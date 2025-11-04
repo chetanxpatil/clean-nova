@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+
+data/snli_1.0_train.jsonl
+data/snli_1.0_test.jsonl
