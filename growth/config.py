@@ -12,7 +12,7 @@ CONFIG = {
     "embed_shape": (3, 3, 3),
     "polarity_scale": 1.0,
     "polarity_shift": 0.0,
-    "snli_train_limit": 10000,
+    "snli_train_limit": 5000,
     "snli_test_limit": 500,
     "calib_frac": 0.1,
     "neutral_band_grid": [x / 100 for x in range(5, 61, 5)],
