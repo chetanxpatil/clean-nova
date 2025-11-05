@@ -31,6 +31,9 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
     phi_vals = []
     correct = 0
 
+    # --- 1. Initialize Rule Counter ---
+    rule_counts = {"merge": 0, "branch": 0, "stabilize": 0, "revert": 0}
+
     # --- CALIBRATE THE MIND ---
     # Set the mind's internal state from the calibrator
     mind.neutral_band = neutral_band
@@ -49,6 +52,9 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
 
         # 2. Ask the GrowthMind to choose a rule
         rule = mind.choose_rule(phi)
+
+        # --- 2. Increment Rule Counter ---
+        rule_counts[rule] += 1
 
         # 3. Map the MIND'S choice to a prediction
         if rule == "merge":
@@ -77,13 +83,35 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
             A = text_to_lattice(s1)
             B = text_to_lattice(s2)
             C = A.weights - B.weights  # Compute coupling
-            key = f"{rule}_{g}"
+
+            # --- ================================== ---
+            # ---        STEP 5.2 FEEDBACK FIX       ---
+            # --- ================================== ---
+            # We must train the memory on the GROUND TRUTH (g),
+            # not the mind's prediction (rule), to avoid a feedback loop.
+
+            # Convert 'g' (the gold label) to a "gold rule"
+            if g == "entailment":
+                gold_rule = "merge"
+            elif g == "contradiction":
+                gold_rule = "branch"
+            else:
+                gold_rule = "stabilize"
+
+            # The key's *first part* MUST be the 'gold_rule'
+            # so memory.remember stores the Phi value in the correct list.
+            key = f"{gold_rule}_{pred}"
+            # --- ================================== ---
+            # ---            END OF FIX            ---
+            # --- ================================== ---
 
             # Remember the transformation
             mind.note_coupling(key, C, phi, A.weights.shape, B.weights.shape)
 
-            # Try recalling similar prior
-            prior = mind.suggest_coupling(key, A.weights.shape, B.weights.shape)
+            # Try recalling similar prior (using the *predicted* rule)
+            # This is OK, as we want to see what we *thought* we did last time.
+            recall_key = f"{rule}_{g}"
+            prior = mind.suggest_coupling(recall_key, A.weights.shape, B.weights.shape)
 
             # --- Optional: memory-aware reward shaping ---
             if prior is not None:
@@ -101,29 +129,39 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
             mind.step(intent, note=f"{g}->{pred}", external_correct=is_correct)
 
             # Apply the secondary memory bonus
+            # (Note: this still updates the Q-policy, which we are plotting
+            # but not using for decisions)
             mind.policy.update(rule, memory_bonus)
 
         # 6. Print progress
-        if i % 1000 == 0 and CONFIG["progress"]:
+        if i % 1000 == 0 and CONFIG["progress"]:  # Changed from 200 back to 1000
             progress_ratio = i / len(pairs)
             current_accuracy = correct / i
             phi_avg = np.mean(phi_vals)
 
             print(f"\n📍 Step {i:5d} / {len(pairs)} ({progress_ratio:.1%} complete)")
-            print(f"   Accuracy: {current_accuracy:.3f} | Φ̄ = {phi_avg:+.3f} | Neutral Band = {mind.neutral_band:.3f}")
+            print(f"   Accuracy: {current_accuracy:.3f} | Φ̄ = {phi_avg:+.3f}")
             print(f"   Policy Snapshot → {mind.policy.describe()}")
 
             try:
-                reflection = mind.reflect()
-                print(f"   🧠 Mind Reflection: {reflection}")
-            except AttributeError:
-                print("   (No reflection available for current mind state)")
+                mind.reflect()
+                # The reflection printout is inside the reflect() method itself
+            except AttributeError as e:
+                print(f"   (No reflection available: {e})")
 
     # --- Final stats for the epoch ---
     dist = {l: int(sum(cm[:, i])) for i, l in enumerate(labels)}
     acc = correct / len(pairs)
+
+    # --- 3. Calculate and Print Rule Distribution ---
+    total_rules = max(1, len(pairs))  # Avoid division by zero
+    rule_dist = {k: f"{(v / total_rules) * 100:.1f}%" for k, v in rule_counts.items()}
+
     print(f"\n📊 {title}: acc={acc:.3f}, Φ mean={np.mean(phi_vals):+.3f}, "
           f"range=[{min(phi_vals):+.3f},{max(phi_vals):+.3f}], dist={dist}")
+
+    print(f"   Rule Choices: {rule_dist}")  # <-- ADDED THIS LINE
+
     print("Confusion (Gold \\ Pred):")
     header = " " * 13 + " ".join([f"{l:<13}" for l in labels])
     print(header)
