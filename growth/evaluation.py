@@ -9,6 +9,7 @@ from growth.mind.growth_mind import GrowthMind
 from growth.phi_computer import phi_raw_for_pair
 from growth.lattice_encoding import text_to_lattice
 from growth.config import CONFIG
+from growth.language import express_decision  # <-- STEP 6: IMPORT
 
 try:
     from tqdm import tqdm
@@ -133,8 +134,26 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
             # but not using for decisions)
             mind.policy.update(rule, memory_bonus)
 
+        # --- ================================== ---
+        # ---   STEP 6: LANGUAGE EXPRESSION    ---
+        # --- ================================== ---
+        # Print the first 5 examples, but ONLY during the TEST phase.
+        if not is_training and i <= 5:
+            # Call the new language function
+            expression = express_decision(rule, phi)
+
+            print("\n" + "-" * 20 + f" TEST EXAMPLE {i} " + "-" * 20)
+            print(f"  Premise:    {s1}")
+            print(f"  Hypothesis: {s2}")
+            print(f"  Gold Label: {g} ({'Correct' if is_correct else 'INCORRECT'})")
+            print(f"  Mind's Internal Choice: {rule}")
+            print(f"  Mind's Expression: {expression}")
+        # --- ================================== ---
+        # ---          END OF STEP 6           ---
+        # --- ================================== ---
+
         # 6. Print progress
-        if i % 1000 == 0 and CONFIG["progress"]:  # Changed from 200 back to 1000
+        if i % 1000 == 0 and CONFIG["progress"]:
             progress_ratio = i / len(pairs)
             current_accuracy = correct / i
             phi_avg = np.mean(phi_vals)
@@ -160,7 +179,7 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
     print(f"\n📊 {title}: acc={acc:.3f}, Φ mean={np.mean(phi_vals):+.3f}, "
           f"range=[{min(phi_vals):+.3f},{max(phi_vals):+.3f}], dist={dist}")
 
-    print(f"   Rule Choices: {rule_dist}")  # <-- ADDED THIS LINE
+    print(f"   Rule Choices: {rule_dist}")
 
     print("Confusion (Gold \\ Pred):")
     header = " " * 13 + " ".join([f"{l:<13}" for l in labels])
