@@ -24,11 +24,48 @@ class MemoryCoupling:
     def key(self, src_shape: Tuple[int, ...], dst_shape: Tuple[int, ...], tag: str = "") -> str:
         """Generate a unique key for a given source/destination shape and tag."""
         return f"{tag}|src={src_shape}|dst={dst_shape}"
-
+    #
+    # def remember(self, key: str, C: np.ndarray, phi: float) -> None:
+    #     """
+    #     Remembers two things:
+    #     1. (Step 4) The coupling matrix 'C' via an EMA update.
+    #     2. (Step 5.4) The raw 'phi' value, filed under its ground-truth rule.
+    #     """
+    #
+    #     # --- 1. (Step 4) Update Coupling Matrix (Original Logic) ---
+    #     C = np.asarray(C, dtype=float)
+    #     phi_eff = np.tanh(phi)
+    #     alpha = self.alpha * (0.5 + 0.5 * abs(phi_eff))
+    #
+    #     if key in self.store:
+    #         old = self.store[key]
+    #         C_new = (1 - alpha) * old + alpha * C
+    #     else:
+    #         if len(self.store) >= self.max_size:
+    #             oldest = sorted(self.meta.items(), key=lambda kv: kv[1]["t"])[0][0]
+    #             self.store.pop(oldest, None)
+    #             self.meta.pop(oldest, None)
+    #         C_new = C
+    #
+    #     self.store[key] = C_new / (np.linalg.norm(C_new) + 1e-8)
+    #     self.meta[key] = {"t": time.time(), "Φ": float(phi)}
+    #
+    #     # --- 2. (Step 5.4) Update Full Phi History ---
+    #     # "Purification" logic is REMOVED. We store ALL data.
+    #     rule = key.split('_')[0]
+    #
+    #     if rule in ("merge", "branch", "stabilize"):
+    #         history = self.phi_history[rule]
+    #         history.append(phi)
+    #         # Prune old entries to keep memory fresh
+    #         if len(history) > self.max_history_per_rule:
+    #             self.phi_history[rule] = history[-self.max_history_per_rule:]
+    #
+    # # --- NEW (Step 5.4) Phi Bias Calculation ---
     def remember(self, key: str, C: np.ndarray, phi: float) -> None:
         """
         Remembers two things:
-        1. (Step 4) The coupling matrix 'C' via an EMA update.
+        1. (Step 4) The coupling matrix 'C' via an EMA update (now tracking count).
         2. (Step 5.4) The raw 'phi' value, filed under its ground-truth rule.
         """
 
@@ -37,21 +74,29 @@ class MemoryCoupling:
         phi_eff = np.tanh(phi)
         alpha = self.alpha * (0.5 + 0.5 * abs(phi_eff))
 
+        # --- INITIALIZE OR RETRIEVE METADATA ---
+        meta_entry = self.meta.get(key, {"t": time.time(), "Φ": float(phi), "count": 0})
+
         if key in self.store:
             old = self.store[key]
             C_new = (1 - alpha) * old + alpha * C
+            meta_entry["count"] += 1  # INCREMENT COUNT ON UPDATE
         else:
             if len(self.store) >= self.max_size:
                 oldest = sorted(self.meta.items(), key=lambda kv: kv[1]["t"])[0][0]
                 self.store.pop(oldest, None)
                 self.meta.pop(oldest, None)
             C_new = C
+            meta_entry["count"] = 1  # START COUNT AT 1 ON CREATION
 
         self.store[key] = C_new / (np.linalg.norm(C_new) + 1e-8)
-        self.meta[key] = {"t": time.time(), "Φ": float(phi)}
 
-        # --- 2. (Step 5.4) Update Full Phi History ---
-        # "Purification" logic is REMOVED. We store ALL data.
+        # --- UPDATE METADATA ---
+        meta_entry["t"] = time.time()
+        meta_entry["Φ"] = float(phi)
+        self.meta[key] = meta_entry
+
+        # --- 2. (Step 5.4) Update Full Phi History (Unchanged) ---
         rule = key.split('_')[0]
 
         if rule in ("merge", "branch", "stabilize"):
@@ -60,8 +105,6 @@ class MemoryCoupling:
             # Prune old entries to keep memory fresh
             if len(history) > self.max_history_per_rule:
                 self.phi_history[rule] = history[-self.max_history_per_rule:]
-
-    # --- NEW (Step 5.4) Phi Bias Calculation ---
 
     def get_phi_bias(
             self,

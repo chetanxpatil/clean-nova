@@ -27,6 +27,8 @@ class GrowthNode:
     state: LatticeState
     polarity: float = 0.0
     depth: int = 0
+    node_id: int = field(default=-1)  # Unique, persistent ID (e.g., step index)
+    parent_id: int = field(default=-1)  # ID of the parent node
     rule: str = "origin"
     note: str = ""
     parent: Optional["GrowthNode"] = None
@@ -36,11 +38,23 @@ class GrowthNode:
     # ----------------------------------------------------------
     # Core growth transformations
     # ----------------------------------------------------------
-    def merge_with(self, other: "GrowthNode") -> "GrowthNode":
+    # def merge_with(self, other: "GrowthNode") -> "GrowthNode":
+    #     intent = compute_intent(self.state, other.state)
+    #     result, log = apply_rule("merge", self.state, other.state, intent=intent, log=self.log)
+    #     node = GrowthNode(result.new_state, result.new_polarity, self.depth + 1,
+    #                       rule=result.rule, note=result.note, parent=self, log=log)
+    #     self.children.append(node)
+    #     return node
+    def merge_with(self, other: "GrowthNode", **kwargs) -> "GrowthNode":
+        # Note: You will need to update the caller (GrowthMind.step) to pass
+        # node_id and parent_id via **kwargs.
         intent = compute_intent(self.state, other.state)
         result, log = apply_rule("merge", self.state, other.state, intent=intent, log=self.log)
+
         node = GrowthNode(result.new_state, result.new_polarity, self.depth + 1,
-                          rule=result.rule, note=result.note, parent=self, log=log)
+                          rule=result.rule, note=result.note,
+                          parent=self, log=log, **kwargs)  # Pass IDs here
+
         self.children.append(node)
         return node
 

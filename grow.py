@@ -11,6 +11,7 @@ from growth.phi_computer import phi_raw_for_pair
 from growth.mind.growth_mind import GrowthMind
 from growth.config import CONFIG
 from growth.language import express_decision  # The mind's voice
+import time
 
 
 # ------------------------------------------------------------
@@ -65,10 +66,11 @@ def interactive_run(mind, phi_sign, band):
             # 1. Compute the core Phi signal
             phi_raw = phi_raw_for_pair(premise, hypothesis)
             phi = mind.phi_sign * phi_raw
+            time.sleep(1.5)  # Pause for 1.5 seconds (you can change this value)
 
             # 2. Get the mind's decision rule (The 53% core logic)
             rule = mind.choose_rule(phi)
-
+            print("🧠 Processing thought...")
             # 3. Get the mind's final expression (Step 6)
             expression = express_decision(rule, phi)
 

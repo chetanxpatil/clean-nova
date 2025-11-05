@@ -63,14 +63,3 @@ class GrowthMindIntrospectionMixin:
         print(f"   Φ̄={stats['Φ_mean']:+.3f}, σ²={stats['Φ_var']:.4f}, entropy={stats['entropy']:.3f}")
         print(f"   Policy → " + ", ".join(f"{k}:{policy[k]:.2f}" for k in policy))
         print(f"   Dynamic Temp: {self.temperature:.3f}") # Added for debugging
-
-    def realign(self: 'GrowthMind', phi_sign: float, neutral_band: float):
-        """Update internal calibration parameters."""
-        self.phi_sign = phi_sign
-        self.neutral_band = neutral_band
-        self.journal.append({
-            "t": time.time(),
-            "event": "realign",
-            "phi_sign": phi_sign,
-            "neutral_band": neutral_band
-        })

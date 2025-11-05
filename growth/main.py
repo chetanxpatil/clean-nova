@@ -43,7 +43,7 @@ def main():
     # --- Initialize GrowthMind ---
     mind = GrowthMind.from_config({
         "temperature": 0.10,
-        "phi_damping": 0.90,
+        "phi_damping": 0.95,
         "branch_var_threshold": 0.02,
         "neutral_band": band,  # Pass calibrated band
     })
