@@ -6,7 +6,7 @@ Central configuration for the SNLI experiment.
 CONFIG = {
     "seed": 42,
     "use_embeddings": True,
-    "embedding_model": "all-MiniLM-L6-v2",
+    "embedding_model": "all-mpnet-base-v2",
     "embed_channels": 4,  # try 4 or 8
     "embed_scale": 25.0,
     "embed_shape": (3, 3, 3),

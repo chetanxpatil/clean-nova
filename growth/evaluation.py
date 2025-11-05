@@ -1,4 +1,3 @@
-# growth/evaluation.py
 """
 Contains the main evaluation loop for training and testing the GrowthMind.
 """
@@ -9,7 +8,7 @@ from growth.mind.growth_mind import GrowthMind
 from growth.phi_computer import phi_raw_for_pair
 from growth.lattice_encoding import text_to_lattice
 from growth.config import CONFIG
-from growth.language import express_decision  # <-- STEP 6: IMPORT
+from growth.language import express_decision
 
 try:
     from tqdm import tqdm
@@ -36,7 +35,6 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
     rule_counts = {"merge": 0, "branch": 0, "stabilize": 0, "revert": 0}
 
     # --- CALIBRATE THE MIND ---
-    # Set the mind's internal state from the calibrator
     mind.neutral_band = neutral_band
     mind.phi_sign = phi_sign
 
@@ -88,10 +86,6 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
             # --- ================================== ---
             # ---        STEP 5.2 FEEDBACK FIX       ---
             # --- ================================== ---
-            # We must train the memory on the GROUND TRUTH (g),
-            # not the mind's prediction (rule), to avoid a feedback loop.
-
-            # Convert 'g' (the gold label) to a "gold rule"
             if g == "entailment":
                 gold_rule = "merge"
             elif g == "contradiction":
@@ -99,47 +93,33 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
             else:
                 gold_rule = "stabilize"
 
-            # The key's *first part* MUST be the 'gold_rule'
-            # so memory.remember stores the Phi value in the correct list.
             key = f"{gold_rule}_{pred}"
             # --- ================================== ---
             # ---            END OF FIX            ---
             # --- ================================== ---
 
-            # Remember the transformation
             mind.note_coupling(key, C, phi, A.weights.shape, B.weights.shape)
 
-            # Try recalling similar prior (using the *predicted* rule)
-            # This is OK, as we want to see what we *thought* we did last time.
             recall_key = f"{rule}_{g}"
             prior = mind.suggest_coupling(recall_key, A.weights.shape, B.weights.shape)
 
-            # --- Optional: memory-aware reward shaping ---
             if prior is not None:
                 phi_bias = 0.05 * np.tanh(np.mean(prior))
                 phi += phi_bias
-                intent.polarity = float(phi)  # Update intent for mind.step
+                intent.polarity = float(phi)
 
                 coupling_similarity = float(np.tanh(np.mean(np.abs(prior - C))))
                 memory_bonus = 0.1 * (1.0 - coupling_similarity)
             else:
                 memory_bonus = 0.0
-            # --- End MemoryCoupling integration ---
 
-            # Pass BOTH intrinsic (intent) and extrinsic (is_correct) signals
             mind.step(intent, note=f"{g}->{pred}", external_correct=is_correct)
-
-            # Apply the secondary memory bonus
-            # (Note: this still updates the Q-policy, which we are plotting
-            # but not using for decisions)
             mind.policy.update(rule, memory_bonus)
 
         # --- ================================== ---
         # ---   STEP 6: LANGUAGE EXPRESSION    ---
         # --- ================================== ---
-        # Print the first 5 examples, but ONLY during the TEST phase.
         if not is_training and i <= 5:
-            # Call the new language function
             expression = express_decision(rule, phi)
 
             print("\n" + "-" * 20 + f" TEST EXAMPLE {i} " + "-" * 20)
@@ -164,16 +144,15 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
 
             try:
                 mind.reflect()
-                # The reflection printout is inside the reflect() method itself
             except AttributeError as e:
                 print(f"   (No reflection available: {e})")
 
     # --- Final stats for the epoch ---
     dist = {l: int(sum(cm[:, i])) for i, l in enumerate(labels)}
-    acc = correct / len(pairs)
+    acc = correct / max(1, len(pairs))  # Avoid division by zero
 
     # --- 3. Calculate and Print Rule Distribution ---
-    total_rules = max(1, len(pairs))  # Avoid division by zero
+    total_rules = max(1, len(pairs))
     rule_dist = {k: f"{(v / total_rules) * 100:.1f}%" for k, v in rule_counts.items()}
 
     print(f"\n📊 {title}: acc={acc:.3f}, Φ mean={np.mean(phi_vals):+.3f}, "
@@ -189,4 +168,5 @@ def evaluate_with_mind(pairs: List[Tuple[str, str, str]],
         row = f"  {l:<13}" + " ".join([f"{cm[i, j]:<13}" for j in range(3)])
         print(row)
 
-    return cm
+    # --- THIS IS THE FIX ---
+    return cm, acc

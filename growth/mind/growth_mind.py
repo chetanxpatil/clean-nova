@@ -3,19 +3,14 @@
 Livnium Growth — growth_mind.py
 ===============================
 Recursive tree-of-thought manager built on GrowthNode and rules.py.
-
-This file defines the core GrowthMind class, which inherits functionality
-from various mixins:
-  - GrowthMindMemoryMixin: Adapters for MemoryCoupling.
-  - GrowthMindExpansionMixin: Motif-aware expansion logic.
-  - GrowthMindIntrospectionMixin: Stats, reflection, and traversal.
-  - GrowthMindPersistenceMixin: Saving and loading state.
+This is our champion model, now with smarter meta-cognition.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Tuple, Any
-import time, random, numpy as np
+from typing import Optional, Dict, List
+import time
+import numpy as np
 
 # --- Core Livnium Imports ---
 from core.lattice import LatticeState, canonical_symbol_layout
@@ -44,6 +39,10 @@ class GrowthMind(
     GrowthMindIntrospectionMixin,
     GrowthMindPersistenceMixin
 ):
+    """
+    Core recursive tree-of-thought controller.
+    Orchestrates rule selection, node creation, and adaptive temperature control.
+    """
     root: GrowthNode
     active: GrowthNode
     policy: PolicyPi = field(default_factory=PolicyPi)
@@ -70,9 +69,13 @@ class GrowthMind(
     # Motif influence strength
     motif_eta: float = 0.15
 
+    # --- STEP 7: META-COGNITION ATTRIBUTE ---
+    std_dev_factor: float = 0.5  # This is no longer used, but fine to keep.
+
     # -------------------------------------------------------------------
     @classmethod
     def from_config(cls, cfg: dict) -> "GrowthMind":
+        """Instantiate GrowthMind from configuration dictionary."""
         mind = cls.from_state()
         mind.temperature = cfg.get("temperature", 0.04)
         mind.phi_damping = cfg.get("phi_damping", 0.95)
@@ -82,6 +85,7 @@ class GrowthMind(
 
     @staticmethod
     def from_state(state: Optional[LatticeState] = None, polarity: float = 1.0) -> "GrowthMind":
+        """Create a GrowthMind starting from an initial LatticeState."""
         if state is None:
             state = canonical_symbol_layout()
         node = GrowthNode(state, polarity=polarity, depth=0, rule="origin")
@@ -90,17 +94,19 @@ class GrowthMind(
     # -------------------------------------------------------------------
     # Core ToT control
     # -------------------------------------------------------------------
+
     def choose_rule(self, phi: float) -> str:
         """
-        Our final, 53%-accurate "Dumb Mind" model.
-        It uses a simple, static neutral band and IGNORES all
-        Q-learning and adaptive "smart" logic.
+        Our final, champion "Dumb Core" model.
+        It uses a simple, static neutral band that is tuned
+        by the meta-cognition step.
         """
-        band = float(self.neutral_band)  # 0.45
 
         # --- ================================== ---
-        # ---      OUR FINAL 53% MODEL         ---
+        # ---      OUR FINAL STABLE CORE       ---
         # --- ================================== ---
+
+        band = float(self.neutral_band)  # This is 0.45 or our new, tuned value
 
         if phi > band:
             base = "merge"
@@ -115,17 +121,12 @@ class GrowthMind(
         # ---         END OF FINAL MODEL       ---
         # --- ================================== ---
 
-        # (This Q-policy logic is now "dead code" because we return early)
-        weighted = sorted(self.policy.Q.items(), key=lambda kv: (-kv[1], kv[0]))
-        top = weighted[0][0]
-
-        if random.random() < 0.05:  # 5% chance to try something random
-            return random.choice(list(self.policy.Q.keys()))
-
-        return base if self.policy.Q[base] >= self.policy.Q[top] else top
-
-    def step(self, intent: Optional[IntentVector] = None, note: str = "",
-             external_correct: Optional[bool] = None) -> GrowthNode:
+    def step(
+            self,
+            intent: Optional[IntentVector] = None,
+            note: str = "",
+            external_correct: Optional[bool] = None
+    ) -> GrowthNode:
 
         A = self.active.state
         if intent is None:
@@ -136,67 +137,56 @@ class GrowthMind(
         # 'rule' is now *always* the base rule from the "dumb mind"
         rule = self.choose_rule(phi)
 
-        # (This exploration code is now "dead" because choose_rule returns early)
-        if random.random() < self.temperature * 4:
-            # Exploration: override the 'best' rule
-            probs = self.policy.softmax_probs(self.temperature)
-            rule = np.random.choice(list(probs.keys()), p=list(probs.values()))
+        parent_state = self.active.parent.state if self.active.parent else self.active.state
 
         # --- Apply Rule ---
         if rule == "merge":
-            partner = self.active.parent.state if self.active.parent else self.active.state
-            result, _ = apply_rule("merge", self.active.state, partner, intent=intent, log=self.active.log)
+            result, _ = apply_rule("merge", self.active.state, parent_state, intent=intent, log=self.active.log)
         elif rule == "branch":
             result, _ = apply_rule("branch", self.active.state, intent, log=self.active.log)
         elif rule == "stabilize":
             result, _ = apply_rule("stabilize", self.active.state, log=self.active.log)
-        else:  # rule == "revert"
+        else:
             rule = "revert"
-            result, _ = apply_rule("revert", self.active.state,
-                                   self.active.parent.state if self.active.parent else self.active.state,
-                                   log=self.active.log)
+            result, _ = apply_rule("revert", self.active.state, parent_state, log=self.active.log)
 
-        child = GrowthNode(result.new_state, result.new_polarity * self.phi_damping,
-                           depth=self.active.depth + 1, rule=result.rule,
-                           note=result.note, parent=self.active, log=self.active.log)
+        # --- Node creation ---
+        child = GrowthNode(
+            result.new_state,
+            result.new_polarity * self.phi_damping,
+            depth=self.active.depth + 1,
+            rule=result.rule,
+            note=result.note,
+            parent=self.active,
+            log=self.active.log
+        )
         self.active.children.append(child)
         self.active = child
+
         assert verify_conservation(child.state), "ΣSW violated in GrowthMind.step"
 
         # --- FIELD UPDATE ---
         self.phi_field = child.state.weights
-        self.last_phi = child.polarity  # Still useful to track this
-        current_entropy = self.policy.entropy(self.temperature)  # Still useful for logging
+        self.last_phi = child.polarity
+        current_entropy = self.policy.entropy(self.temperature)
 
-        # --- ================================== ---
-        # ---         SIMPLE REWARD            ---
-        # --- =S================================= ---
-
-        # We still calculate a reward so we can *plot* the
-        # (unused) Q-policy learning in the background.
-
+        # --- SIMPLE REWARD ---
         if external_correct:
             total_reward = 1.0
         elif external_correct is False:
             total_reward = -1.0
         else:
-            total_reward = 0.0  # No reward if no external signal
-
-        # --- ================================== ---
-        # ---          END REWARD              ---
-        # --- ================================== ---
+            total_reward = 0.0
 
         # --- FINAL POLICY UPDATE ---
         self.policy.update(rule, total_reward)
 
         # --- ENTROPY-COUPLED TEMPERATURE FEEDBACK ---
-        # (This block is fine, as it only affects exploration temperature)
         try:
             self.temperature *= (0.995 if current_entropy > 1.5 else 1.002)
             self.temperature = np.clip(self.temperature, 0.02, 0.12)
         except Exception:
             pass
-        # --- END TEMPERATURE FEEDBACK ---
 
         # --- JOURNALING ---
         if self.last_logged_pi is None:
@@ -209,8 +199,10 @@ class GrowthMind(
             })
 
         current_pi = dict(self.policy.Q)
-        delta_pi = {k: round(current_pi[k] - self.last_logged_pi.get(k, 0.0), 6)
-                    for k in current_pi}
+        delta_pi = {
+            k: round(current_pi[k] - self.last_logged_pi.get(k, 0.0), 6)
+            for k in current_pi
+        }
         self.last_logged_pi = current_pi
 
         delta_q_norm = float(np.linalg.norm(np.array(list(delta_pi.values())))) if delta_pi else 0.0
@@ -222,7 +214,59 @@ class GrowthMind(
             "note": note or child.note,
             "Δπ": delta_pi,
             "ΔQ_norm": delta_q_norm,
-            "entropy": current_entropy
+            "entropy": current_entropy,
         })
 
         return child
+
+    # -------------------------------------------------------------------
+    # STEP 7: META-COGNITION
+    # -------------------------------------------------------------------
+
+    def metacog_reflect_and_tune(self, cm: np.ndarray, train_acc: float) -> None:
+        """
+        Think about our own thinking.
+        Analyze the confusion matrix (cm) from the last run and
+        tune the mind's internal NEUTRAL_BAND for the *next* run.
+        """
+        print("\n" + "=" * 20 + " META-COGNITION REFLECTION " + "=" * 20)
+
+        # Calculate accuracy for "neutral"
+        neutral_total = cm[1, :].sum()
+        neutral_correct = cm[1, 1]
+
+        if neutral_total == 0:
+            print("🧠 [MetaCog] No neutral samples seen. No tuning applied.")
+            return
+
+        neutral_acc = neutral_correct / neutral_total
+        print(f"🧠 [MetaCog] Last run total accuracy: {train_acc:.2%}")
+        print(f"🧠 [MetaCog] Last run 'neutral' accuracy: {neutral_acc:.2%}")
+        print(f"🧠 [MetaCog] Current neutral_band: {self.neutral_band:.3f}")
+
+        # --- NEW "AMBITIOUS" META-COGNITION RULE ---
+        # The mind now expects its neutral accuracy to be
+        # reasonably close to its total accuracy.
+
+        # We're lagging if neutral acc is 10% or more behind total acc
+        is_lagging = neutral_acc < (train_acc - 0.10)
+
+        # We're too cautious if we're *over*-performing on neutral
+        is_too_cautious = neutral_acc > (train_acc + 0.05)
+
+        if is_lagging:
+            # We are being too aggressive (not guessing neutral enough).
+            # WIDEN the neutral band to be more cautious.
+            self.neutral_band = min(self.neutral_band + 0.05, 0.60)  # Cap at 0.60
+            print(f"🧠 [MetaCog] RESULT: Neutral performance is lagging. Widening band to {self.neutral_band:.3f}")
+
+        elif is_too_cautious:
+            # We are being too cautious (guessing neutral too much).
+            # NARROW the neutral band to be more aggressive.
+            self.neutral_band = max(self.neutral_band - 0.05, 0.20)  # Min at 0.20
+            print(f"🧠 [MetaCog] RESULT: Too cautious. Narrowing band to {self.neutral_band:.3f}")
+
+        else:
+            print("🧠 [MetaCog] RESULT: Performance is balanced. No tuning required.")
+
+        print("=" * 66)

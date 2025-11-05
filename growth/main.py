@@ -54,10 +54,21 @@ def main():
     train_phase_data = train[hstart:]
 
     # --- Training phase ---
-    evaluate_with_mind(train_phase_data, phi_sign, band, "TRAIN", mind, is_training=True)
+    # We capture the confusion matrix (cm) AND the final accuracy (acc)
+    cm_train, acc_train = evaluate_with_mind(
+        train_phase_data, phi_sign, band, "TRAIN", mind, is_training=True
+    )
+
+    # --- Meta-Cognition phase (Step 7) ---
+    # The mind now reflects on its own training performance...
+    mind.metacog_reflect_and_tune(cm_train, acc_train)
+    # ...and will use its new, tuned 'neutral_band' for the TEST phase.
 
     # --- Testing phase (frozen learning) ---
-    evaluate_with_mind(test, phi_sign, band, "TEST", mind, is_training=False)
+    # We now pass 'mind.neutral_band', which may have been changed by Step 7.
+    evaluate_with_mind(
+        test, phi_sign, mind.neutral_band, "TEST", mind, is_training=False
+    )
 
     # --- Reflective log and save state ---
     print("\n" + "=" * 20 + " FINAL REFLECTION " + "=" * 20)
