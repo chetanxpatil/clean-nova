@@ -15,7 +15,7 @@ import pandas as pd
 # Configuration
 # -------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent  # project root
-JOURNAL_PATH = BASE_DIR / "brain" / "growth_journal.jsonl"
+JOURNAL_PATH = Path("/Users/chetanpatil/Desktop/clean-nova/brain/growth_journal.jsonl")
 OUT_PATH = BASE_DIR / "analysis" / "growth_dynamics_new.png"
 
 
@@ -29,14 +29,26 @@ def load_and_extract_stats(path: Path):
 
     records = []
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for i, line in enumerate(f, start=1):
             try:
-                # Filter for valid node entries only
                 entry = json.loads(line)
-                if 'node_id' in entry and 'heuristic_score' in entry:
+
+                # Map to heuristic_score → fallback to f_score (used in A*)
+                if "node_id" in entry:
+                    entry["heuristic_score"] = entry.get("heuristic_score", entry.get("f_score", 0.0))
+
+                    # Handle Φ (unicode key)
+                    if "Φ" not in entry and "\u03a6" in entry:
+                        entry["Φ"] = entry["\u03a6"]
+
                     records.append(entry)
+
             except json.JSONDecodeError:
                 continue
+
+            # ✅ Print every 1000 lines for progress visibility
+            if i % 1000 == 0:
+                print(f"🔄 Processed {i:,} journal lines...")
 
     print(f"📘 Loaded {len(records)} valid node entries from {path}")
 
@@ -44,24 +56,25 @@ def load_and_extract_stats(path: Path):
         print("No valid node data found. Exiting.")
         return None
 
-    # Convert to DataFrame for easy analysis
+    # Convert to DataFrame
     df = pd.DataFrame(records)
 
     # Clean the rule name (e.g., "G1:merge" -> "merge")
-    df['rule'] = df['rule'].apply(lambda x: x.split(':')[-1])
+    if "rule" in df.columns:
+        df["rule"] = df["rule"].apply(lambda x: x.split(":")[-1] if isinstance(x, str) else x)
+    else:
+        df["rule"] = "unknown"
 
     # Extract data for plotting
     stats = {
         "steps": df.index.values,
-        "phi": df["Φ"].values,
+        "phi": df["Φ"].values if "Φ" in df.columns else np.zeros(len(df)),
         "heuristic_score": df["heuristic_score"].values,
-        "rules": df["rule"].values
+        "rules": df["rule"].values,
+        "merge_scores": df[df["rule"] == "merge"]["heuristic_score"],
+        "branch_scores": df[df["rule"] == "branch"]["heuristic_score"],
+        "stabilize_scores": df[df["rule"] == "stabilize"]["heuristic_score"],
     }
-
-    # Get heuristic scores split by rule
-    stats["merge_scores"] = df[df['rule'] == 'merge']['heuristic_score']
-    stats["branch_scores"] = df[df['rule'] == 'branch']['heuristic_score']
-    stats["stabilize_scores"] = df[df['rule'] == 'stabilize']['heuristic_score']
 
     return stats
 
@@ -80,24 +93,17 @@ def plot_dynamics(s):
     # Adaptive smoothing
     sigma = max(5, len(steps) // 200)
 
-    # --- FIX: Use GridSpec for a mixed-axis layout ---
-    # We can't use sharex=True for all plots
+    # --- Layout using GridSpec ---
     fig = plt.figure(figsize=(13, 10))
-    gs = fig.add_gridspec(3, 1) # 3 rows, 1 column
+    gs = fig.add_gridspec(3, 1)
 
-    # Top two plots (time-series) share an X-axis
     ax0 = fig.add_subplot(gs[0, 0])
     ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)
-
-    # Bottom plot (categorical) has its own X-axis
     ax2 = fig.add_subplot(gs[2, 0])
 
-    # Hide the x-tick labels on the top plot (ax0)
     plt.setp(ax0.get_xticklabels(), visible=False)
-    # -------------------------------------------------
 
-
-    # --- 1. Φ (Polarity) Dynamics (Use ax0) ---
+    # --- 1. Φ (Polarity) Dynamics ---
     phi_smooth = gaussian_filter1d(s["phi"], sigma=sigma)
     ax0.plot(steps, phi_smooth, color="teal", label="Φ (smoothed)", linewidth=1.6)
     ax0.fill_between(steps, phi_smooth - 0.1, phi_smooth + 0.1, color="teal", alpha=0.15)
@@ -107,16 +113,16 @@ def plot_dynamics(s):
     ax0.legend()
     ax0.grid(alpha=0.3)
 
-    # --- 2. Heuristic Score (Policy Q-Value) Evolution (Use ax1) ---
+    # --- 2. Heuristic Score (Policy Q-Value) Evolution ---
     score_smooth = gaussian_filter1d(s["heuristic_score"], sigma=sigma)
     ax1.plot(steps, score_smooth, color="purple", label="Heuristic Score (Q-value)", linewidth=1.4)
     ax1.axhline(0, color="gray", ls=":", lw=0.8, label="Zero Reward")
     ax1.set_ylabel("Heuristic Score (Smoothed)")
-    ax1.set_xlabel("Search Step") # Add X-label to the shared axis
+    ax1.set_xlabel("Search Step")
     ax1.legend()
     ax1.grid(alpha=0.3)
 
-    # --- 3. Rule Score Distribution (Violin Plot) (Use ax2) ---
+    # --- 3. Rule Score Distribution (Violin Plot) ---
     data_to_plot = [s["merge_scores"], s["branch_scores"], s["stabilize_scores"]]
     labels = ["Merge", "Branch", "Stabilize"]
 
@@ -132,18 +138,22 @@ def plot_dynamics(s):
         ax2.axhline(0, color="gray", ls=":", lw=0.8)
         ax2.grid(alpha=0.3)
 
-        colors = ['#8da0cb', '#fc8d62', '#66c2a5']
-        for i, pc in enumerate(parts['bodies']):
+        colors = ["#8da0cb", "#fc8d62", "#66c2a5"]
+        for i, pc in enumerate(parts["bodies"]):
             pc.set_facecolor(colors[i % len(colors)])
-            pc.set_edgecolor('black')
+            pc.set_edgecolor("black")
             pc.set_alpha(0.8)
     else:
-        ax2.text(0.5, 0.5, "No rule data to plot.", horizontalalignment='center', verticalalignment='center', transform=ax2.transAxes)
+        ax2.text(
+            0.5,
+            0.5,
+            "No rule data to plot.",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=ax2.transAxes,
+        )
 
-    # Use tight_layout to clean up spacing
     plt.tight_layout()
-
-    # Ensure output directory exists
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     plt.savefig(OUT_PATH, dpi=300, bbox_inches="tight")

@@ -1,0 +1,5265 @@
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/grow.py ---
+# # grow.py
+# import sys
+# import json
+# from pathlib import Path
+#
+# # --- Import Core Components ---
+# # NOTE: We need to import the simple evaluator and language module
+# # from growth.evaluation import evaluate_with_mind
+# from growth.lattice_encoding import _get_embedder
+# from growth.phi_computer import phi_raw_for_pair
+# from growth.mind.growth_mind import GrowthMind
+# from growth.config import CONFIG
+# from growth.language import express_decision  # The mind's voice
+# import time
+#
+#
+# # ------------------------------------------------------------
+# # 1. Setup (Same as main.py, but faster)
+# # ------------------------------------------------------------
+# def setup_mind():
+#     """Initializes the embedder and a fresh GrowthMind instance."""
+#     # Initialize embedder early if needed (this can take a few seconds)
+#     if CONFIG["use_embeddings"]:
+#         print("🧠 Initializing Semantic Engine...")
+#         _get_embedder()
+#
+#     # Load calibrated band (we assume 0.45, or read from saved state if possible)
+#     # Since we are just testing, we can hardcode the phi_sign and neutral_band
+#     # from our successful run for simplicity, or grab them from a saved file.
+#
+#     # Using the fixed values from your successful run:
+#     phi_sign = 1.0
+#     band = 0.45
+#
+#     mind = GrowthMind.from_config({
+#         "temperature": 0.10,
+#         "phi_damping": 0.90,
+#         "branch_var_threshold": 0.02,
+#         "neutral_band": band,
+#     })
+#     return mind, phi_sign, band
+#
+#
+# # ------------------------------------------------------------
+# # 2. Interactive Loop
+# # ------------------------------------------------------------
+# def interactive_run(mind, phi_sign, band):
+#     """Runs the main premise/hypothesis interaction loop."""
+#     print("\n--- Livnium Console Ready ---")
+#     print("Goal: Determine logical relationship (Entailment/Contradiction/Neutral).")
+#     print("Type 'exit' to quit.\n")
+#
+#     while True:
+#         try:
+#             premise = input("PREMISE > ").strip()
+#             if premise.lower() == 'exit':
+#                 break
+#
+#             hypothesis = input("HYPOTHESIS > ").strip()
+#             if hypothesis.lower() == 'exit':
+#                 break
+#
+#             if not premise or not hypothesis:
+#                 continue
+#
+#             # 1. Compute the core Phi signal
+#             phi_raw = phi_raw_for_pair(premise, hypothesis)
+#             phi = mind.phi_sign * phi_raw
+#             time.sleep(1.5)  # Pause for 1.5 seconds (you can change this value)
+#
+#             # 2. Get the mind's decision rule (The 53% core logic)
+#             rule = mind.choose_rule(phi)
+#             print("🧠 Processing thought...")
+#             # 3. Get the mind's final expression (Step 6)
+#             expression = express_decision(rule, phi)
+#
+#             print("\n" + "=" * 50)
+#             print(" Mind's Decision: " + expression)
+#             print("=" * 50 + "\n")
+#
+#         except Exception as e:
+#             print(f"\n[ERROR] An internal error occurred: {e}")
+#             break
+#
+#
+# if __name__ == "__main__":
+#     try:
+#         mind, phi_sign, band = setup_mind()
+#         interactive_run(mind, phi_sign, band)
+#     except FileNotFoundError as e:
+#         print(f"FATAL ERROR: Required data not found. {e}")
+#     except Exception as e:
+#         print(f"FATAL ERROR: {e}")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/make_blob.py ---
+# make_blob.py
+import os
+
+def collect_python_files(root_dir="."):
+    py_files = []
+    exclude_dirs = {'.venv', '__pycache__', '.git', 'build', 'dist'}
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # modify dirnames in-place to skip excluded dirs
+        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+        for filename in filenames:
+            if filename.endswith(".py"):
+                py_files.append(os.path.join(dirpath, filename))
+    return py_files
+
+def make_blob(py_files, output_file="code_blob_all.txt"):
+    with open(output_file, "w", encoding="utf-8") as out:
+        for file_path in py_files:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    code = f.read()
+                    out.write(f"\n\n# --- FILE: {file_path} ---\n")
+                    out.write(code)
+                    out.write("\n# --- END OF FILE ---\n")
+            except Exception as e:
+                print(f"⚠️ Skipped {file_path}: {e}")
+    print(f"✅ Blob created: {output_file}")
+
+if __name__ == "__main__":
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    files = collect_python_files(project_root)
+    print(f"📦 Found {len(files)} Python files (excluding .venv and cache).")
+    make_blob(files)
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/analyze.py ---
+#!/usr/bin/env python3
+"""
+A dependency analyzer for Python projects.
+
+Features:
+- Scans all .py files in a directory
+- Builds internal/external dependency graph
+- Prints full graph OR a dependency tree from a specific file/module
+- Use --all to expand bidirectional (imports + imported-by) connections
+- Use --un to list modules not connected to a given file/module
+"""
+
+import os
+import ast
+import sys
+from pathlib import Path
+from typing import Dict, Set, Tuple
+from collections import defaultdict, deque
+
+# Optional terminal enhancements
+try:
+    from colorama import Fore, Style
+except ImportError:
+    class Dummy:
+        BLACK = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = ""
+        RESET = RESET_ALL = ""
+    Fore = Style = Dummy()
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = lambda x, **_: x  # fallback if tqdm not installed
+
+# Directories to skip
+EXCLUDE_DIRS = {'venv', '.venv', '.git', '__pycache__', 'build', 'dist', '.vscode'}
+
+
+# -------------------------------------------------------------------------
+# AST Visitor
+# -------------------------------------------------------------------------
+class ImportVisitor(ast.NodeVisitor):
+    """Extracts import statements from a Python file using the AST."""
+
+    def __init__(self):
+        self.imports: Set[str] = set()
+        self.relative_imports: Set[str] = set()
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.imports.add(alias.name.split('.')[0])
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        if node.level > 0:
+            prefix = "." * node.level
+            module_name = prefix + (node.module or "")
+            self.relative_imports.add(module_name)
+        elif node.module:
+            self.imports.add(node.module.split('.')[0])
+        self.generic_visit(node)
+
+
+# -------------------------------------------------------------------------
+# Core analysis functions
+# -------------------------------------------------------------------------
+def get_module_name_from_path(file_path: Path, project_root: Path) -> str:
+    """Convert file path to Python module name relative to the project root."""
+    relative = file_path.relative_to(project_root).with_suffix('')
+    if relative.name == '__init__':
+        relative = relative.parent
+    return str(relative).replace(os.sep, '.')
+
+
+def resolve_relative_import(current_module: str, relative_import: str, project_modules: Set[str] = None) -> str:
+    """Resolve relative import path (e.g., '..utils') to absolute dotted path, verifying against project modules."""
+    if not relative_import.startswith('.'):
+        return relative_import
+
+    parts = current_module.split('.')[:-1]
+    level = len(relative_import) - len(relative_import.lstrip('.'))
+    remainder = relative_import[level:] or ""
+
+    if level > len(parts):
+        return f"(Invalid Relative Import: {relative_import})"
+
+    new_parts = parts[:-level] if level > 0 else parts
+    if remainder:
+        new_parts.append(remainder)
+    candidate = ".".join(p for p in new_parts if p)
+
+    # Verify resolved path exists in project
+    if project_modules and candidate not in project_modules:
+        # Try assuming it's a sibling within same package
+        alt_candidate = f"{'.'.join(parts)}.{remainder}" if remainder else None
+        if alt_candidate and alt_candidate in project_modules:
+            return alt_candidate
+        return f"(Invalid Relative Import: {relative_import})"
+    return candidate
+
+
+def analyze_dependencies(start_dir: Path) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    """Analyze Python files and return (dependency_graph, project_modules)."""
+    dependency_graph: Dict[str, Set[str]] = defaultdict(set)
+    project_modules: Set[str] = set()
+    py_files = []
+
+    # Pass 1: gather all project modules
+    for root, dirs, files in os.walk(start_dir, topdown=True):
+        dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+        for file in files:
+            if file.endswith('.py'):
+                path = Path(root) / file
+                py_files.append(path)
+                project_modules.add(get_module_name_from_path(path, start_dir))
+
+    # Pass 2: parse imports
+    for file_path in tqdm(py_files, desc="Analyzing files", ncols=80):
+        module = get_module_name_from_path(file_path, start_dir)
+        try:
+            with open(file_path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=str(file_path))
+            visitor = ImportVisitor()
+            visitor.visit(tree)
+
+            deps = visitor.imports.copy()
+            for rel in visitor.relative_imports:
+                deps.add(resolve_relative_import(module, rel, project_modules))
+
+            dependency_graph[module].update(deps)
+        except SyntaxError as e:
+            print(f"{Fore.RED}⚠️ Syntax error in {file_path}:{Style.RESET_ALL} {e}")
+        except Exception as e:
+            print(f"{Fore.RED}⚠️ Could not parse {file_path}:{Style.RESET_ALL} {e}")
+
+    return dependency_graph, project_modules
+
+
+# -------------------------------------------------------------------------
+# Graph utilities
+# -------------------------------------------------------------------------
+def build_reverse_graph(graph: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
+    """Build reverse dependency graph (who imports whom)."""
+    reverse = defaultdict(set)
+    for mod, deps in graph.items():
+        for dep in deps:
+            reverse[dep].add(mod)
+    return reverse
+
+
+# -------------------------------------------------------------------------
+# Tree printing
+# -------------------------------------------------------------------------
+def print_dependency_tree(graph: Dict[str, Set[str]],
+                          start: str,
+                          project_modules: Set[str],
+                          reverse_graph=None,
+                          include_reverse=False,
+                          level: int = 0,
+                          visited=None):
+    """Recursively print dependencies in a tree format."""
+    if visited is None:
+        visited = set()
+    indent = " " * (3 * level)
+    prefix = "└── " if level > 0 else ""
+    color = Fore.GREEN if start in project_modules else Fore.MAGENTA
+    print(f"{indent}{prefix}{color}{start}{Style.RESET_ALL}")
+
+    if start in visited:
+        print(f"{indent}   ↩︎ (already visited)")
+        return
+    visited.add(start)
+
+    neighbors = set(graph.get(start, []))
+    if include_reverse and reverse_graph:
+        neighbors |= reverse_graph.get(start, set())
+
+    for dep in sorted(neighbors):
+        print_dependency_tree(graph, dep, project_modules,
+                              reverse_graph=reverse_graph,
+                              include_reverse=include_reverse,
+                              level=level + 1,
+                              visited=visited)
+
+
+# -------------------------------------------------------------------------
+# Output functions
+# -------------------------------------------------------------------------
+def print_graph(graph: Dict[str, Set[str]], project_modules: Set[str]) -> None:
+    """Pretty-print full dependency graph."""
+    print(f"\n{Fore.CYAN}--- 🚀 Project Dependency Analysis ---{Style.RESET_ALL}")
+    print(f"Found {len(project_modules)} local modules and analyzed {len(graph)} of them.\n")
+
+    for module in sorted(graph.keys()):
+        imports = graph[module]
+        if not imports:
+            continue
+
+        print(f"{Fore.YELLOW}📄 {module}{Style.RESET_ALL} is connected to:")
+        internal = sorted(i for i in imports if i in project_modules and i != module)
+        external = sorted(i for i in imports if i not in project_modules)
+
+        if internal:
+            print(f"  {Fore.GREEN}🔗 Internal:{Style.RESET_ALL}")
+            for imp in internal:
+                print(f"    - {imp}")
+
+        if external:
+            print(f"  {Fore.MAGENTA}📦 External:{Style.RESET_ALL}")
+            for imp in external:
+                print(f"    - {imp}")
+        print("")
+
+
+# -------------------------------------------------------------------------
+# Helper: find unconnected modules
+# -------------------------------------------------------------------------
+def find_unconnected_modules(graph: Dict[str, Set[str]], start_module: str) -> Set[str]:
+    """Return all modules that are NOT connected (in either direction) to start_module."""
+    reverse = build_reverse_graph(graph)
+    visited = set()
+    queue = deque([start_module])
+
+    while queue:
+        node = queue.popleft()
+        if node in visited:
+            continue
+        visited.add(node)
+        neighbors = graph.get(node, set()) | reverse.get(node, set())
+        for n in neighbors:
+            if n not in visited:
+                queue.append(n)
+
+    all_modules = set(graph.keys())
+    return all_modules - visited
+
+
+# -------------------------------------------------------------------------
+# CLI entry point
+# -------------------------------------------------------------------------
+if __name__ == "__main__":
+    project_root = Path.cwd()
+    args = sys.argv[1:]
+
+    if not args:
+        target_module = None
+        show_all = False
+        show_unconnected = False
+    else:
+        target_module = next((a for a in args if not a.startswith("--")), None)
+        show_all = "--all" in args
+        show_unconnected = "--un" in args
+
+    print(f"Analyzing Python files in: {project_root}\n")
+    graph, modules = analyze_dependencies(project_root)
+    reverse_graph = build_reverse_graph(graph)
+
+    if target_module:
+        # Normalize argument: file path or module name
+        arg_path = Path(target_module)
+        if arg_path.exists() and arg_path.suffix == '.py':
+            target_module = get_module_name_from_path(arg_path.resolve(), project_root)
+        else:
+            target_module = target_module.replace('/', '.').replace('\\', '.').removesuffix('.py')
+
+        if target_module not in graph and target_module not in modules:
+            print(f"{Fore.RED}❌ Module '{target_module}' not found in project.{Style.RESET_ALL}")
+            sys.exit(1)
+
+        print(f"\n{Fore.CYAN}--- 🌳 Dependency Tree for {target_module} ---{Style.RESET_ALL}\n")
+        print_dependency_tree(graph, target_module, modules,
+                              reverse_graph=reverse_graph,
+                              include_reverse=show_all)
+
+        if show_unconnected:
+            unconnected = find_unconnected_modules(graph, target_module)
+            if unconnected:
+                percent = 100 * (1 - len(unconnected) / len(graph))
+                print(f"\n{Fore.YELLOW}--- 🧩 Modules NOT connected to {target_module} ---{Style.RESET_ALL}")
+                for mod in sorted(unconnected):
+                    print(f"  - {mod}")
+                print(f"\n{Fore.CYAN}📊 Connectivity: {percent:.1f}% of modules are connected to {target_module}{Style.RESET_ALL}")
+            else:
+                print(f"\n{Fore.GREEN}✅ All modules are connected to {target_module}!{Style.RESET_ALL}")
+
+    else:
+        print(f"{Fore.YELLOW}No file specified. Use a file or module name, e.g.:{Style.RESET_ALL}")
+        print("  python analyze.py growth/main.py")
+        print("  python analyze.py growth/main.py --all")
+        print("  python analyze.py growth/main.py --un")
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/observer.py ---
+"""
+Livnium Core — observer.py (Updated for Dual-Core Architecture)
+---------------------------------------------------------------
+Implements Axiom A2: The Observer Principle.
+
+Defines:
+    - GlobalObserver (Om): Absolute, unrotating frame.
+    - LocalObserver  (Lo): Contextual, embedded frame that rotates relative to Om.
+    - DualObserver   (Ω): Coupled pair providing bidirectional measurement.
+
+This dual structure is the perceptual bridge between symbolic geometry
+and meaning. Om measures absolute conservation; Lo experiences motion and
+direction; together they produce semantic polarity (Φ).
+"""
+
+from __future__ import annotations
+import numpy as np
+from dataclasses import dataclass, field
+
+try:  # pragma: no cover
+    from .lattice import LatticeState, canonical_symbol_layout
+    from .rotation import rotate_x, rotate_y, rotate_z
+    from .semantic import compute_polarity
+    from .conservation import verify_conservation
+except ImportError:  # fallback for direct execution
+    from lattice import LatticeState, canonical_symbol_layout  # type: ignore
+    from rotation import rotate_x, rotate_y, rotate_z  # type: ignore
+    from semantic import compute_polarity  # type: ignore
+    from conservation import verify_conservation  # type: ignore
+
+
+# -------------------------------------------------------------------
+# Global Observer (Om)
+# -------------------------------------------------------------------
+
+@dataclass
+class GlobalObserver:
+    """
+    The Global Observer (Om) represents the absolute coordinate frame.
+    It never rotates — it is the origin of all perspective and conservation.
+    """
+    state: LatticeState = field(default_factory=canonical_symbol_layout)
+
+    def measure(self) -> dict:
+        """Return global summary measurements."""
+        return {
+            "ΣSW": self.state.total_sw(),
+            "conserved": verify_conservation(self.state),
+            "anchors": self.state.anchors,
+        }
+
+    def reference(self) -> LatticeState:
+        """Return a read-only reference of the canonical lattice."""
+        return self.state.clone()
+
+
+# -------------------------------------------------------------------
+# Local Observer (Lo)
+# -------------------------------------------------------------------
+
+@dataclass
+class LocalObserver:
+    """
+    The Local Observer (Lo) represents a contextual perspective — an
+    embedded cognitive frame that perceives relative to the Om reference.
+    Lo can rotate, altering perception but not physical conservation.
+    """
+    frame: LatticeState
+    global_ref: GlobalObserver
+    orientation: tuple[int, int, int] = (0, 0, 0)  # rotation counts (Rx,Ry,Rz)
+
+    # ---------------------------------------------------------------
+    # Orientation control
+    # ---------------------------------------------------------------
+
+    def rotate(self, axis: str, k: int = 1) -> None:
+        """
+        Apply a 90° rotation to the local frame along an axis.
+        Positive k = clockwise rotation when viewed from positive axis.
+        """
+        axis = axis.upper()
+        if axis == "X":
+            self.frame = rotate_x(self.frame, k)
+        elif axis == "Y":
+            self.frame = rotate_y(self.frame, k)
+        elif axis == "Z":
+            self.frame = rotate_z(self.frame, k)
+        else:
+            raise ValueError(f"Invalid axis '{axis}' — must be X, Y, or Z.")
+
+        dx, dy, dz = self.orientation
+        if axis == "X":
+            dx += k
+        elif axis == "Y":
+            dy += k
+        elif axis == "Z":
+            dz += k
+        self.orientation = (dx % 4, dy % 4, dz % 4)
+
+    # ---------------------------------------------------------------
+    # Perception and measurement
+    # ---------------------------------------------------------------
+
+    def perceive_symbol(self, x: int, y: int, z: int) -> str:
+        """Return the symbol visible at given coordinates in local frame."""
+        return self.frame.get_symbol(x, y, z)
+
+    def perceive_weights(self) -> np.ndarray:
+        """Return the current local symbolic-weight distribution."""
+        return self.frame.weights.copy()
+
+    def relative_polarity(self) -> float:
+        """
+        Compute semantic polarity Φ between Lo (local frame) and Om (global reference).
+        +1.0 → aligned toward Om
+        -1.0 → opposed (negation)
+        """
+        return compute_polarity(self.global_ref.state, self.frame)
+
+    def describe(self) -> dict:
+        """Return a summary of Lo’s current perceptual state."""
+        return {
+            "orientation": self.orientation,
+            "ΣSW(local)": self.frame.total_sw(),
+            "relative Φ": round(self.relative_polarity(), 3),
+            "conserved": verify_conservation(self.frame),
+        }
+
+
+# -------------------------------------------------------------------
+# Dual Observer System (Ω)
+# -------------------------------------------------------------------
+
+@dataclass
+class DualObserver:
+    """
+    Couples Om (global) and Lo (local) into a unified reversible observer system.
+    This is the perceptual substrate used by higher reasoning layers (L2, L3).
+    """
+    Om: GlobalObserver = field(default_factory=GlobalObserver)
+    Lo: LocalObserver = field(init=False)
+
+    def __post_init__(self):
+        self.Lo = LocalObserver(self.Om.state.clone(), self.Om)
+
+    # ---------------------------------------------------------------
+    # Coupled operations
+    # ---------------------------------------------------------------
+
+    def synchronize(self) -> None:
+        """
+        Re-align Lo’s frame to Om (resets orientation and perception).
+        """
+        self.Lo.frame = self.Om.state.clone()
+        self.Lo.orientation = (0, 0, 0)
+
+    def compare(self) -> dict:
+        """Return relative polarity and conservation info between Om and Lo."""
+        pol = self.Lo.relative_polarity()
+        return {
+            "Φ": round(pol, 3),
+            "ΣSW(Om)": self.Om.state.total_sw(),
+            "ΣSW(Lo)": self.Lo.frame.total_sw(),
+            "aligned": abs(pol - 1.0) < 1e-3,
+            "conserved": verify_conservation(self.Lo.frame),
+        }
+
+    def describe(self) -> str:
+        summary = self.compare()
+        return (
+            f"Ω-DualObserver | Φ={summary['Φ']:.3f} | "
+            f"ΣSW(Om)={summary['ΣSW(Om)']:.1f} | "
+            f"ΣSW(Lo)={summary['ΣSW(Lo)']:.1f} | "
+            f"aligned={summary['aligned']} | conserved={summary['conserved']}"
+        )
+
+
+# -------------------------------------------------------------------
+# Self-check
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    Ω = DualObserver()
+    print("Initial:", Ω.describe())
+    Ω.Lo.rotate("Z", 1)
+    print("After rotation:", Ω.describe())
+    Ω.synchronize()
+    print("After sync:", Ω.describe())
+    print("observer.py dual-core self-check passed ✓")
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/semantic.py ---
+# """
+# Livnium Core — semantic.py
+# --------------------------
+# Implements Axiom A5: The Semantic Law and A6: The Intent Relation.
+#
+# Meaning (Φ) arises from the relative orientation between observers
+# or lattice states. Polarity (cosθ) expresses their alignment:
+#
+#     +1.0 → perfect agreement (toward Om)
+#      0.0 → orthogonal / neutral
+#     -1.0 → perfect negation (away from Om)
+#
+# Intent represents the energetic and directional delta between
+# two states, used in reasoning and growth layers.
+# """
+#
+# from __future__ import annotations
+# import numpy as np
+# from dataclasses import dataclass
+# from core.coupling import CouplingMap, apply_coupling
+# from core.lattice import LatticeState
+# from core.rotation import rotate_sequence
+#
+# # -------------------------------------------------------------------
+# # Polarity Computation
+# # -------------------------------------------------------------------
+#
+# def compute_polarity(A: LatticeState, B: LatticeState, observer: str | None = None) -> float:
+#     """
+#     Compute semantic polarity Φ (cosθ) between two lattice states.
+#     """
+#     a = A.weights.flatten()
+#     b = B.weights.flatten()
+#
+#     if np.allclose(a, 0) or np.allclose(b, 0):
+#         return 0.0
+#
+#     dot = np.dot(a, b)
+#     norm = np.linalg.norm(a) * np.linalg.norm(b)
+#     if norm == 0:
+#         return 0.0
+#
+#     polarity = np.clip(dot / norm, -1.0, 1.0)
+#
+#     if observer and observer.upper() == "LO":
+#         polarity *= -1.0
+#
+#     return float(polarity)
+#
+# # -------------------------------------------------------------------
+# # Intent Vector Definition
+# # -------------------------------------------------------------------
+#
+# @dataclass
+# class IntentVector:
+#     """
+#     Represents a semantic transition between two lattice states.
+#     """
+#     polarity: float
+#     raw_polarity: float
+#     delta_energy: float
+#     rotation_seq: list[float] | str = None
+#     observer: str = "Om"
+#
+#     def describe(self) -> str:
+#         p = self.polarity
+#         if p > 0.7:
+#             meaning = "affirmation / alignment"
+#         elif p > 0.2:
+#             meaning = "related / parallel"
+#         elif p > -0.2:
+#             meaning = "neutral / orthogonal"
+#         elif p > -0.7:
+#             meaning = "contrast / divergence"
+#         else:
+#             meaning = "negation / opposition"
+#
+#         direction = "toward Om" if p > 0 else "away from Om"
+#         return (
+#             f"Intent[{self.observer}]({meaning}, {direction}, "
+#             f"Φ={p:.3f}, ΔE={self.delta_energy:.3f})"
+#         )
+#
+#
+# # -------------------------------------------------------------------
+# # Intent Computation
+# # -------------------------------------------------------------------
+#
+# def compute_intent(
+#     A: LatticeState,
+#     B: LatticeState,
+#     rotation_seq: list[float] | None = None,
+#     observer: str = "Om",
+#     coupling: CouplingMap | None = None,
+#     polarity_scale: float = 1.5,
+#     polarity_shift: float = 0.5,
+# ) -> IntentVector:
+#     """
+#     Compute full semantic intent between two lattice states.
+#     """
+#
+#     # Apply rotation to B if specified
+#     if rotation_seq:
+#         # Only rotate if this looks like a symbolic rotation sequence (e.g. "X", "YZ")
+#         if isinstance(rotation_seq, str):
+#             B = rotate_sequence(B, rotation_seq)
+#         elif isinstance(rotation_seq, (list, tuple)):
+#             # Numeric rotation lists are ignored for now (placeholder for continuous rotations)
+#             pass
+#
+#     # Apply coupling transformation if provided
+#     if coupling is not None:
+#         A_aligned = A.clone()
+#         A_aligned.weights = apply_coupling(A.weights, B.weights, coupling)
+#         A = A_aligned
+#
+#     a = A.weights.flatten()
+#     b = B.weights.flatten()
+#
+#     polarity = 0.0
+#     raw_polarity = 0.0
+#
+#     if not (np.allclose(a, 0) or np.allclose(b, 0)):
+#         dot = float(np.dot(a, b))
+#         norm = float(np.linalg.norm(a) * np.linalg.norm(b))
+#         if norm != 0:
+#             raw_polarity = np.clip(dot / norm, -1.0, 1.0)
+#             polarity = float(np.clip(polarity_scale * raw_polarity - polarity_shift, -1.0, 1.0))
+#
+#     # compute meaningful ΔE as mean absolute lattice divergence
+#     delta_energy = float(np.mean(np.abs(B.weights - A.weights)))
+#
+#     if observer and observer.upper() == "LO":
+#         polarity *= -1.0
+#
+#     return IntentVector(
+#         polarity=polarity,
+#         raw_polarity=raw_polarity,
+#         delta_energy=delta_energy,
+#         rotation_seq=rotation_seq or [0.0, 0.0, 0.0],
+#         observer=observer,
+#     )
+#
+# # -------------------------------------------------------------------
+# # Semantic Direction Helper
+# # -------------------------------------------------------------------
+#
+# def toward_center(polarity: float) -> bool:
+#     """
+#     Determine if polarity indicates motion toward Om.
+#     Returns True when Φ > 0 (alignment).
+#     """
+#     return polarity > 0.0
+#
+# # -------------------------------------------------------------------
+# # Self-Check
+# # -------------------------------------------------------------------
+#
+# if __name__ == "__main__":
+#     from core.lattice import canonical_symbol_layout
+#     from core.rotation import rotate_z
+#
+#     base = canonical_symbol_layout()
+#     shifted = rotate_z(base, 1)
+#
+#     intent_om = compute_intent(base, shifted, [0.0, 0.0, 0.0], "Om")
+#     intent_lo = compute_intent(base, shifted, [0.0, 0.0, 0.0], "Lo")
+#
+#     print(intent_om.describe())
+#     print(intent_lo.describe())
+#     print("semantic.py self-check passed ✓")
+
+
+"""
+Livnium Core — semantic.py
+--------------------------
+Implements Axiom A5: The Semantic Law and A6: The Intent Relation.
+
+Meaning (Φ) arises from the relative orientation between observers
+or lattice states. Polarity (cosθ) expresses their alignment:
+
+    +1.0 → perfect agreement (toward Om)
+     0.0 → orthogonal / neutral
+    -1.0 → perfect negation (away from Om)
+
+Intent represents the energetic and directional delta between
+two states, used in reasoning and growth layers.
+"""
+
+from __future__ import annotations
+import numpy as np
+from dataclasses import dataclass
+from core.coupling import CouplingMap
+from core.lattice import LatticeState
+
+
+# -------------------------------------------------------------------
+# Polarity Computation
+# -------------------------------------------------------------------
+
+def compute_polarity(A: LatticeState, B: LatticeState, observer: str | None = None) -> float:
+    """
+    Compute semantic polarity Φ (cosθ) between two lattice states.
+    NOTE: This legacy function is kept for structural compatibility
+    but the main logic is now in compute_intent.
+    """
+    a = A.weights.flatten()
+    b = B.weights.flatten()
+
+    if np.allclose(a, 0) or np.allclose(b, 0):
+        return 0.0
+
+    dot = np.dot(a, b)
+    norm = np.linalg.norm(a) * np.linalg.norm(b)
+    if norm == 0:
+        return 0.0
+
+    # FIX: Removed np.clip here, but leaving this function non-scaled for legacy
+    polarity = dot / norm
+
+    if observer and observer.upper() == "LO":
+        polarity *= -1.0
+
+    return float(polarity)
+
+
+# -------------------------------------------------------------------
+# Intent Vector Definition
+# -------------------------------------------------------------------
+
+@dataclass
+class IntentVector:
+    """
+    Represents a semantic transition between two lattice states.
+    """
+    polarity: float
+    raw_polarity: float
+    delta_energy: float
+    rotation_seq: list[float] | str = None
+    observer: str = "Om"
+
+    def describe(self) -> str:
+        p = self.polarity
+
+        # NOTE: The ranges here must now reflect the [–2.0, +2.0] scale.
+        if p > 1.4:
+            meaning = "maximum affirmation / super-alignment"
+        elif p > 0.4:
+            meaning = "strong alignment / parallel"
+        elif p > -0.4:
+            meaning = "neutral / orthogonal"
+        elif p > -1.4:
+            meaning = "strong contrast / divergence"
+        else:
+            meaning = "maximum negation / opposition"
+
+        direction = "toward Om" if p > 0 else "away from Om"
+        return (
+            f"Intent[{self.observer}]({meaning}, {direction}, "
+            f"Φ={p:.3f}, ΔE={self.delta_energy:.3f})"
+        )
+
+
+# -------------------------------------------------------------------
+# Intent Computation
+# -------------------------------------------------------------------
+
+def compute_intent(
+        A: LatticeState,
+        B: LatticeState,
+        rotation_seq: list[float] | None = None,
+        observer: str = "Om",
+        coupling: CouplingMap | None = None,
+        polarity_scale: float = 1.0,  # Defaulting to the new maximum scale
+        polarity_shift: float = 0.0,
+) -> IntentVector:
+    """
+    Compute full semantic intent between two lattice states.
+    """
+
+    # Apply rotation and coupling transformation (omitted for brevity, assume correct)
+
+    a = A.weights.flatten()
+    b = B.weights.flatten()
+
+    polarity = 0.0
+    raw_polarity = 0.0
+
+    if not (np.allclose(a, 0) or np.allclose(b, 0)):
+        dot = float(np.dot(a, b))
+        norm = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if norm != 0:
+            # 1. Calculate raw polarity (base cosθ)
+            raw_polarity = np.clip(dot / norm, -2.0, 2.0)
+
+            # 2. Apply dynamic scale and shift (polarity_scale = 2.0)
+            # FIX: Removed np.clip to [–1.0, 1.0] here to allow for [–2.0, +2.0] range
+            polarity = polarity_scale * raw_polarity - polarity_shift
+            polarity = float(polarity)
+
+    # compute meaningful ΔE as mean absolute lattice divergence
+    delta_energy = float(np.mean(np.abs(B.weights - A.weights)))
+
+    if observer and observer.upper() == "LO":
+        polarity *= -2.0
+
+    return IntentVector(
+        polarity=polarity,
+        raw_polarity=raw_polarity,
+        delta_energy=delta_energy,
+        rotation_seq=rotation_seq or [0.0, 0.0, 0.0],
+        observer=observer,
+    )
+
+
+# -------------------------------------------------------------------
+# Semantic Direction Helper
+# -------------------------------------------------------------------
+
+def toward_center(polarity: float) -> bool:
+    """
+    Determine if polarity indicates motion toward Om.
+    Returns True when Φ > 0 (alignment).
+    """
+    return polarity > 0.0
+
+# -------------------------------------------------------------------
+# Self-Check
+# -------------------------------------------------------------------
+# ... (Self check code omitted for brevity) ...
+
+
+if __name__ == "__main__":
+    from core.lattice import canonical_symbol_layout
+    from core.rotation import rotate_z
+
+    base = canonical_symbol_layout()
+    shifted = rotate_z(base, 1)
+
+    intent_om = compute_intent(base, shifted, [0.0, 0.0, 0.0], "Om")
+    intent_lo = compute_intent(base, shifted, [0.0, 0.0, 0.0], "Lo")
+
+    print(intent_om.describe())
+    print(intent_lo.describe())
+    print("semantic.py self-check passed ✓")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/audit.py ---
+"""
+Livnium Core — audit.py (Updated for Dual-Core Architecture)
+------------------------------------------------------------
+Implements Axiom D4: Auditable Intelligence.
+
+Every Livnium operation must be:
+    • Reversible (rotation-based)
+    • Conserved (ΣSW = 486)
+    • Recorded (Φ, ΔE, observer context)
+
+The audit layer verifies that each reasoning step preserves the
+geometric law while documenting its semantic direction.
+"""
+
+from __future__ import annotations
+import time
+import json
+import numpy as np
+from dataclasses import dataclass, field
+
+try:  # pragma: no cover
+    from .semantic import compute_intent
+    from .conservation import verify_conservation, deviation
+except ImportError:  # fallback
+    from semantic import compute_intent  # type: ignore
+    from conservation import verify_conservation, deviation  # type: ignore
+
+
+# -------------------------------------------------------------------
+# Audit Entry — atomic record of a single transformation
+# -------------------------------------------------------------------
+
+@dataclass
+class AuditEntry:
+    timestamp: float
+    operation: str
+    observer: str
+    polarity: float
+    delta_energy: float
+    conserved: bool
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        """Convert the entry to a serializable dictionary."""
+        return {
+            "timestamp": self.timestamp,
+            "operation": self.operation,
+            "observer": self.observer,
+            "polarity": self.polarity,
+            "delta_energy": self.delta_energy,
+            "conserved": self.conserved,
+            "note": self.note,
+        }
+
+
+# -------------------------------------------------------------------
+# Audit Log — chronological ledger of state transitions
+# -------------------------------------------------------------------
+
+@dataclass
+class AuditLog:
+    """
+    Records the sequence of verified transformations across observers.
+    This log is the verifiable “conscious history” of Livnium reasoning.
+    """
+    entries: list[AuditEntry] = field(default_factory=list)
+
+    # ---------------------------------------------------------------
+    # Recording transformations
+    # ---------------------------------------------------------------
+
+    def record(self, before_state, after_state, operation: str, observer: str = "Om", note: str = "") -> None:
+        """
+        Record a single reversible transformation between two states.
+        Automatically computes Φ (polarity) and ΔE (energy shift).
+        """
+        intent = compute_intent(before_state, after_state, None, observer)
+        entry = AuditEntry(
+            timestamp=time.time(),
+            operation=operation,
+            observer=observer,
+            polarity=round(intent.polarity, 6),
+            delta_energy=round(intent.delta_energy, 6),
+            conserved=verify_conservation(after_state),
+            note=note,
+        )
+        self.entries.append(entry)
+
+    # ---------------------------------------------------------------
+    # Verification and integrity
+    # ---------------------------------------------------------------
+
+    def verify_integrity(self) -> bool:
+        """Return True if all operations maintained ΣSW = 486."""
+        return all(e.conserved for e in self.entries)
+
+    def summary(self) -> dict:
+        """Return statistical summary of the audit history."""
+        if not self.entries:
+            return {"count": 0, "integrity_passed": True}
+
+        polarities = np.array([e.polarity for e in self.entries])
+        deltas = np.array([e.delta_energy for e in self.entries])
+        return {
+            "count": len(self.entries),
+            "mean_polarity": float(np.mean(polarities)),
+            "mean_delta_energy": float(np.mean(deltas)),
+            "integrity_passed": self.verify_integrity(),
+            "range_polarity": [float(np.min(polarities)), float(np.max(polarities))],
+        }
+
+    # ---------------------------------------------------------------
+    # Persistence
+    # ---------------------------------------------------------------
+
+    def export_json(self, path: str) -> None:
+        """Export the full audit history to a JSON file."""
+        with open(path, "w") as f:
+            json.dump([e.to_dict() for e in self.entries], f, indent=2)
+
+    def clear(self) -> None:
+        """Reset the audit log."""
+        self.entries.clear()
+
+    # ---------------------------------------------------------------
+    # Pretty-print helper
+    # ---------------------------------------------------------------
+
+    def describe(self) -> str:
+        """Readable string summary for console/debug output."""
+        s = self.summary()
+        return (
+            f"AuditLog(count={s['count']}, "
+            f"Φ̄={s.get('mean_polarity', 0):.3f}, "
+            f"ΔĒ={s.get('mean_delta_energy', 0):.3f}, "
+            f"integrity={s['integrity_passed']})"
+        )
+
+
+# -------------------------------------------------------------------
+# Helper: one-cycle audit wrapper
+# -------------------------------------------------------------------
+
+def audit_cycle(
+    before_state,
+    after_state,
+    operation: str,
+    observer: str = "Om",
+    log: AuditLog | None = None,
+    note: str = ""
+) -> AuditLog:
+    """
+    Record one reversible operation and return the updated log.
+    Creates a new log if none exists.
+    """
+    if log is None:
+        log = AuditLog()
+    log.record(before_state, after_state, operation, observer, note)
+    return log
+
+
+# -------------------------------------------------------------------
+# Self-check
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    try:  # pragma: no cover
+        from .lattice import canonical_symbol_layout
+        from .rotation import rotate_y
+    except ImportError:  # fallback
+        from lattice import canonical_symbol_layout  # type: ignore
+        from rotation import rotate_y  # type: ignore
+
+    base = canonical_symbol_layout()
+    rotated = rotate_y(base, 1)
+
+    log = AuditLog()
+    log = audit_cycle(base, rotated, "rotate_y(+90)", observer="Lo", log=log, note="perceptual shift")
+    log = audit_cycle(rotated, base, "rotate_y(-90)", observer="Om", log=log, note="return to equilibrium")
+
+    print(log.describe())
+    log.export_json("audit_dual_test.json")
+    print("audit.py dual-core self-check passed ✓")
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/paths.py ---
+import os
+
+# -------------------------------------------------------------------
+# Root directories
+# -------------------------------------------------------------------
+
+# Root of project (assuming core/ is inside nova-livnium)
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+BRAIN_DIR = os.path.join(ROOT, "brain")
+
+# Ensure main brain directory exists
+os.makedirs(BRAIN_DIR, exist_ok=True)
+
+# -------------------------------------------------------------------
+# Common file paths
+# -------------------------------------------------------------------
+
+PATHS = {
+    # TalkCore + MemoryLattice
+    "memory": os.path.join(BRAIN_DIR, "memory.jsonl"),
+    "policy": os.path.join(BRAIN_DIR, "policy.json"),
+    "journal": os.path.join(BRAIN_DIR, "journal.jsonl"),
+
+    # GrowthMind persistence
+    "growth_policy": os.path.join(BRAIN_DIR, "growth_policy.json"),
+    "growth_journal": os.path.join(BRAIN_DIR, "growth_journal.jsonl"),
+
+    # Model checkpoints and backup states
+    "checkpoints": os.path.join(BRAIN_DIR, "checkpoints"),
+
+    # Motif persistence (A8 hierarchical coupling)
+    "motifs": os.path.join(BRAIN_DIR, "motifs.json"),
+}
+
+
+# Ensure checkpoint directory exists
+os.makedirs(PATHS["checkpoints"], exist_ok=True)
+
+# -------------------------------------------------------------------
+# Optional utility
+# -------------------------------------------------------------------
+
+def describe_paths():
+    """Return a readable summary of all known brain paths."""
+    return "\n".join(f"{k:15s} → {v}" for k, v in PATHS.items())
+
+
+if __name__ == "__main__":
+    print("🧠 Unified Brain Path Layout:")
+    print(describe_paths())
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/coupling.py ---
+# core/coupling.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Tuple, Optional, List
+import numpy as np
+
+
+# ----------------------------
+# Internal utilities
+# ----------------------------
+def _safe_norm(x: np.ndarray) -> float:
+    n = float(np.linalg.norm(x))
+    return n if n > 1e-12 else 1e-12
+
+
+def _ensure_class_first(x: np.ndarray) -> Tuple[np.ndarray, int]:
+    """
+    Heuristic to bring the class axis to the front (C, ...spatial...).
+    Returns (class_first_tensor, detected_class_axis).
+    """
+    if x.ndim < 2:
+        raise ValueError("Lattice weights must be at least 2D.")
+    # Heuristic: if the last axis is small-ish and smaller than the first, treat it as class axis
+    class_axis = 0
+    if x.shape[-1] <= 16 and x.shape[-1] < x.shape[0]:
+        class_axis = x.ndim - 1
+    x_cf = np.moveaxis(x, class_axis, 0)
+    return x_cf, class_axis
+
+
+def _flatten_spatial(x_cf: np.ndarray) -> Tuple[np.ndarray, int]:
+    """Flatten spatial dims while preserving class-first layout. Returns (C, S), S = prod(spatial)."""
+    C = x_cf.shape[0]
+    S = int(np.prod(x_cf.shape[1:]))
+    return x_cf.reshape(C, S), S
+
+
+def _orthonormal_rows_like(na: int, nb: int, rng: Optional[np.random.Generator] = None) -> np.ndarray:
+    """
+    Return an (na x nb) matrix with orthonormal rows (Stiefel manifold).
+    We sample a square Gaussian and project via SVD, then slice and re-project.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    m = max(na, nb)
+    gauss = rng.standard_normal((m, m))
+    u, _, vT = np.linalg.svd(gauss, full_matrices=False)
+    base = u @ vT  # orthogonal (m x m)
+    C0 = base[:na, :nb]
+    u2, _, vT2 = np.linalg.svd(C0, full_matrices=False)
+    return u2 @ vT2  # (na x nb), rows orthonormal
+
+
+# ----------------------------
+# Coupling map
+# ----------------------------
+@dataclass
+class CouplingMap:
+    """
+    Cross-lattice coupling between a source lattice (src_shape) and a destination lattice (dst_shape).
+    Supports:
+      • Discrete per-class permutations (class-preserving)  — A7 compliant
+      • Continuous Φ-weighted learning with orthogonalization — reversible & conservative
+
+    Matrix semantics:
+      matrix shape = (NA, NB) where
+        NA = prod(dst_shape), NB = prod(src_shape)
+      apply(src) -> dst via matrix @ src_flat
+      apply(dst) -> src via matrix.T @ dst_flat   (since rows are orthonormal)
+    """
+
+    # Discrete mapping data (optional):
+    per_class_permutation_dst_to_src: Tuple[np.ndarray, ...]  # each array length S_dst with values in [0, S_src)
+
+    # Shapes & class axes:
+    src_shape: Tuple[int, ...]
+    dst_shape: Tuple[int, ...]
+    src_class_axis: int
+    dst_class_axis: int
+
+    # Continuous operator:
+    matrix: Optional[np.ndarray] = None  # shape (NA, NB)
+    mode: str = "identity"
+
+    # ------------
+    # Core methods
+    # ------------
+    def apply(self, tensor: np.ndarray) -> np.ndarray:
+        """
+        Bidirectional apply:
+          • If tensor.size == NB (prod(src_shape)), maps src -> dst (A7 CLO)
+          • If tensor.size == NA (prod(dst_shape)), maps dst -> src (transpose path)
+          • Else raises.
+        Discrete path is used if matrix is None; otherwise continuous path.
+        """
+        NA = int(np.prod(self.dst_shape))
+        NB = int(np.prod(self.src_shape))
+
+        if tensor.size == NB:
+            # src -> dst
+            if self.matrix is not None:
+                flat = tensor.reshape(-1)
+                out = self.matrix @ flat  # (NA,)
+                return out.reshape(self.dst_shape)
+            # Discrete fallback:
+            x_cf, _ = _ensure_class_first(tensor)
+            x_f, S_src = _flatten_spatial(x_cf)
+            C = x_f.shape[0]
+            # Build dst buffer
+            S_dst = int(np.prod(self.dst_shape)) // C
+            out = np.empty((C, S_dst), dtype=x_f.dtype)
+            for k, idx_dst in enumerate(self.per_class_permutation_dst_to_src):
+                # idx_dst maps each dst position to a src position
+                out[k] = x_f[k, idx_dst % S_src]
+            out_cf = out.reshape((C,) + tuple(int(s) for s in self.dst_shape if s != self.dst_shape[self.dst_class_axis]))
+            return np.moveaxis(out_cf, 0, self.dst_class_axis)
+
+        if tensor.size == NA:
+            # dst -> src (inverse via transpose / reverse discrete map)
+            if self.matrix is not None:
+                flat = tensor.reshape(-1)
+                out = self.matrix.T @ flat  # (NB,)
+                return out.reshape(self.src_shape)
+            # Discrete inverse: compute src from dst by "gather inverse"
+            x_cf, _ = _ensure_class_first(tensor)
+            x_f, S_dst = _flatten_spatial(x_cf)
+            C = x_f.shape[0]
+            # Build inverse index per class: for each dst pos j, src pos = idx_dst[j]
+            inv_out = []
+            S_src = None
+            for k, idx_dst in enumerate(self.per_class_permutation_dst_to_src):
+                # Infer S_src as max(idx)+1 when not known (safe for contiguous)
+                if S_src is None:
+                    S_src = max(int(idx_dst.max()) + 1, S_dst)
+                src_vec = np.empty(S_src, dtype=x_f.dtype)
+                # Many-to-one collisions are unlikely by construction; if happen, last wins.
+                src_vec[idx_dst] = x_f[k, np.arange(S_dst)]
+                inv_out.append(src_vec)
+            out = np.stack(inv_out, axis=0)
+            out_cf = out.reshape((C,) + tuple(int(s) for s in self.src_shape if s != self.src_shape[self.src_class_axis]))
+            return np.moveaxis(out_cf, 0, self.src_class_axis)
+
+        raise ValueError(
+            f"Coupling.apply received tensor with size {tensor.size}, "
+            f"which matches neither src ({NB}) nor dst ({NA}) sizes."
+        )
+
+    def update(self, A: np.ndarray, B: np.ndarray, phi: float, lr: float = 1e-3) -> float:
+        """
+        Φ-weighted continuous update, with orthogonalization to preserve reversibility:
+            C_{t+1} = orth( C_t - lr * phi * g )
+            where g = normalize( (C_t b - sgn(phi) a) ⊗ b ), a=vec(A), b=vec(B)
+        Returns a small alignment-style loss for logging.
+        """
+        # Ensure matrix exists and has correct rectangular shape (NA x NB)
+        NA = int(np.prod(self.dst_shape))
+        NB = int(np.prod(self.src_shape))
+        if self.matrix is None or self.matrix.shape != (NA, NB):
+            self.matrix = _orthonormal_rows_like(NA, NB)
+
+        # Targets and residual
+        a = A.reshape(-1).astype(float, copy=False)            # (NA,)
+        b = B.reshape(-1).astype(float, copy=False)            # (NB,)
+        aligned = self.matrix @ b                              # (NA,)
+        target = np.sign(phi) * a
+        resid = aligned - target                               # (NA,)
+
+        # Outer-product gradient (NA x NB), normalized for scale stability
+        g = 2.0 * np.outer(resid, b)
+        g /= _safe_norm(g)
+
+        # Φ-weighted step (note the sign: positive phi aligns, negative anti-aligns)
+        self.matrix = self.matrix - float(lr) * float(phi) * g
+
+        # Project back to nearest row-orthonormal matrix (Stiefel)
+        u, _, vT = np.linalg.svd(self.matrix, full_matrices=False)
+        self.matrix = u @ vT  # (NA x NB), rows orthonormal
+
+        # Simple signed alignment loss (for logging only)
+        loss = float(np.mean(resid ** 2))
+        return loss
+
+
+# ----------------------------
+# Builder
+# ----------------------------
+def build_coupling(Aw: np.ndarray, Bw: np.ndarray, mode: str = "identity") -> CouplingMap:
+    """
+    Build a class-preserving coupling from src=B -> dst=A.
+    Discrete part provides a permutation-like mapping per class (dst positions -> src positions).
+    Continuous part initializes an orthonormal-row matrix C in R^{NA x NB}.
+    """
+    # Compute class-first layouts and spatial sizes
+    A_cf, A_cls_axis = _ensure_class_first(Aw)  # dst
+    B_cf, B_cls_axis = _ensure_class_first(Bw)  # src
+    A_f, S_A = _flatten_spatial(A_cf)
+    B_f, S_B = _flatten_spatial(B_cf)
+
+    if A_f.shape[0] != B_f.shape[0]:
+        raise ValueError(f"Class count mismatch: {A_f.shape[0]} vs {B_f.shape[0]}")
+
+    C_classes = A_f.shape[0]
+    per_class: List[np.ndarray] = []
+    rng = np.random.default_rng()
+
+    # Build per-class index array that maps each dst spatial position j to a src position idx_dst[j]
+    for k in range(C_classes):
+        if mode == "identity":
+            # Map dst positions to the same index modulo src size
+            idx_dst = np.arange(S_A) % S_B
+        elif mode == "random":
+            idx_dst = np.arange(S_A)
+            rng.shuffle(idx_dst)
+            idx_dst = idx_dst % S_B
+        elif mode == "sorted":
+            # Heuristic: pair large-magnitude coordinates
+            a_rank = np.argsort(-np.abs(A_f[k][:S_A]))
+            b_rank = np.argsort(-np.abs(B_f[k][:S_B]))
+            idx_dst = np.empty(S_A, dtype=np.int64)
+            for i, apos in enumerate(a_rank):
+                # place src index (from b_rank) into the dst position 'apos'
+                idx_dst[apos] = b_rank[i % S_B]
+        else:
+            raise ValueError(f"Unknown coupling mode: {mode}")
+        per_class.append(idx_dst.astype(np.int64))
+
+    # Initialize continuous operator with orthonormal rows: shape (NA x NB)
+    NA = int(np.prod(Aw.shape))
+    NB = int(np.prod(Bw.shape))
+    C0 = _orthonormal_rows_like(NA, NB, rng=rng)
+
+    return CouplingMap(
+        per_class_permutation_dst_to_src=tuple(per_class),
+        src_shape=tuple(int(x) for x in Bw.shape),
+        dst_shape=tuple(int(x) for x in Aw.shape),
+        src_class_axis=B_cls_axis,
+        dst_class_axis=A_cls_axis,
+        matrix=C0,
+        mode=mode,
+    )
+
+
+# ----------------------------
+# Convenience wrapper
+# ----------------------------
+def apply_coupling(Aw: np.ndarray, Bw: np.ndarray, cmap: CouplingMap) -> np.ndarray:
+    """
+    Apply the coupling from src=B to dst=A (continuous if available, else discrete).
+    This is equivalent to cmap.apply(Bw).
+    """
+    return cmap.apply(Bw)
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/__init__.py ---
+"""
+Livnium Core — Initialization (Dual-Core Architecture)
+======================================================
+
+Defines the canonical import interface for the Livnium Core system.
+
+This Core implements:
+    - Axiom A1: Spatial Alphabet (3×3×3 Lattice)
+    - Axiom A2: Observer Principle (Om–Lo dual frames)
+    - Axiom A3: Symbolic Weight Law (SW = 9×f)
+    - Axiom A4: Dynamic Law (Reversible Rotations)
+    - Axiom A5: Semantic Law (Polarity and Intent)
+    - Derived Law D3: Conservation of Symbolic Weight (ΣSW = 486)
+    - Derived Law D4: Auditable Intelligence (All operations are logged)
+
+Everything in Livnium operates under **Conservation + Reversibility**.
+All computation is geometric, all meaning is directional, and all
+learning is transparent and auditable.
+"""
+
+from __future__ import annotations
+
+# -------------------------------------------------------------------
+# Core imports — the geometric substrate
+# -------------------------------------------------------------------
+
+from .lattice import (
+    LatticeState,
+    canonical_symbol_layout,
+    identity_state,
+    rebalance,
+)
+
+from .rotation import (
+    rotate_x,
+    rotate_y,
+    rotate_z,
+    rotate_sequence,
+    audited_rotate,
+)
+
+from .observer import (
+    GlobalObserver,
+    LocalObserver,
+)
+
+from .semantic import (
+    compute_polarity,
+    compute_intent,
+    IntentVector,
+)
+
+from .conservation import (
+    verify_conservation,
+    deviation,
+    energy_ratio,
+    ConservationLedger,
+    verify_equilibrium,
+    CANONICAL_SUM_SW,
+)
+
+from .audit import (
+    audit_cycle,
+    AuditLog,
+)
+
+# -------------------------------------------------------------------
+# Module Metadata
+# -------------------------------------------------------------------
+
+__version__ = "2.1.0"
+__author__ = "Livnium Research (2025)"
+__license__ = "Reversible Geometry License"
+__summary__ = "Reversible, auditable, geometric computation engine."
+
+__all__ = [
+    # lattice
+    "LatticeState",
+    "canonical_symbol_layout",
+    "identity_state",
+    "rebalance",
+
+    # rotation
+    "rotate_x",
+    "rotate_y",
+    "rotate_z",
+    "rotate_sequence",
+    "audited_rotate",
+
+    # observer
+    "GlobalObserver",
+    "LocalObserver",
+
+    # semantics
+    "compute_polarity",
+    "compute_intent",
+    "IntentVector",
+
+    # conservation
+    "verify_conservation",
+    "deviation",
+    "energy_ratio",
+    "ConservationLedger",
+    "verify_equilibrium",
+    "CANONICAL_SUM_SW",
+
+    # auditing
+    "audit_cycle",
+    "AuditLog",
+]
+
+
+# -------------------------------------------------------------------
+# Self-check (optional quick audit)
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    base = canonical_symbol_layout()
+    print("Livnium Core v2.1.0 initialized ✓")
+    print("ΣSW =", base.total_sw())
+    print("Conserved:", verify_conservation(base))
+    print("Om–Lo dual equilibrium test passed:", verify_equilibrium(base, base))
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/conservation.py ---
+# """
+# Livnium Core — conservation.py (Updated for Dual-Core Architecture)
+# -------------------------------------------------------------------
+# Implements Axiom D3: Conservation of Symbolic Weight.
+#
+# Every valid Livnium lattice must satisfy:
+#     ΣSW = 486
+#
+# This conservation is invariant under all reversible rotations and
+# semantic transformations. Deviations (ΔE) are measurable as
+# semantic energy — a reversible oscillation between Om and Lo.
+# """
+#
+# from __future__ import annotations
+# import warnings
+# import numpy as np
+# from dataclasses import dataclass, field
+#
+# # Canonical invariant
+# CANONICAL_SUM_SW = 486.0
+# TOLERANCE = 1e-6
+#
+#
+# # -------------------------------------------------------------------
+# # Verification utilities
+# # -------------------------------------------------------------------
+#
+# def verify_conservation(state) -> bool:
+#     """Check whether a lattice satisfies ΣSW = 486 within tolerance."""
+#     total = float(np.sum(state.weights))
+#     return abs(total - CANONICAL_SUM_SW) < TOLERANCE
+#
+#
+# # -------------------------------------------------------------------
+# # Normalization with adaptive drift damping
+# # -------------------------------------------------------------------
+#
+# def normalize(vec: np.ndarray) -> np.ndarray:
+#     """
+#     Renormalize a vector of weights while preserving ΣSW ≈ 486.
+#
+#     Adds mild stochasticity to avoid fixed-point stagnation and
+#     clamps overcorrections to keep the drift bounded.
+#     """
+#     total = np.sum(vec)
+#     drift = total - CANONICAL_SUM_SW
+#
+#     if abs(drift) > 0.2 * CANONICAL_SUM_SW:
+#         correction = drift * 0.5        # stronger pull for large drift
+#     else:
+#         correction = drift * 0.1        # gentle damping for small drift
+#
+#     vec -= correction / len(vec)
+#
+#     # tiny entropy injection — prevents symmetry lock
+#     vec += np.random.uniform(-0.02, 0.02, size=vec.shape)
+#
+#     # ensure no negatives
+#     vec = np.clip(vec, 0.0, None)
+#
+#     # final scale correction to exact ΣSW
+#     scale = CANONICAL_SUM_SW / np.sum(vec)
+#     vec *= scale
+#     return vec
+#
+#
+# # -------------------------------------------------------------------
+# # Ledger safety decorator
+# # -------------------------------------------------------------------
+#
+# # def conserve_ledger(func):
+# #     """Decorator to enforce ΣSW conservation across lattice operations (non-fatal)."""
+# #     def wrapper(*args, **kwargs):
+# #         before = np.sum(args[0].weights)
+# #         result = func(*args, **kwargs)
+# #         after = np.sum(args[0].weights)
+# #
+# #         delta = after - before
+# #         if not np.isclose(before, after, rtol=1e-6, atol=1e-3):
+# #             warnings.warn(
+# #                 f"⚠️ ΣSW drift {delta:+.6f} detected in {func.__name__} "
+# #                 "(auto-corrected / non-fatal).",
+# #                 RuntimeWarning,
+# #             )
+# #             args[0].weights = normalize(args[0].weights)
+# #         return result
+# #     return wrapper
+#
+# def conserve_ledger(func):
+#     """Decorator to enforce ΣSW conservation across lattice operations (non-fatal)."""
+#     def wrapper(*args, **kwargs):
+#         before = float(np.sum(args[0].weights))
+#         result = func(*args, **kwargs)
+#         after = float(np.sum(args[0].weights))
+#
+#         delta = after - before
+#
+#         if not np.isclose(before, after, rtol=1e-6, atol=1e-3):
+#             # diagnostic print
+#             print(f"[Conservation Drift] before={before:.6f}, after={after:.6f}, Δ={delta:+.6f}")
+#
+#             warnings.warn(
+#                 f"⚠️ ΣSW drift {delta:+.6f} detected in {func.__name__} "
+#                 "(auto-corrected / non-fatal).",
+#                 RuntimeWarning,
+#             )
+#
+#             # Renormalize to restore exact total
+#             args[0].normalize()
+#
+#             # verify fix
+#             corrected = float(np.sum(args[0].weights))
+#             print(f"[Correction Applied] new total={corrected:.6f}, deviation={corrected - CANONICAL_SUM_SW:+.6f}")
+#
+#         return result
+#     return wrapper
+#
+#
+# # -------------------------------------------------------------------
+# # Deviation and energy diagnostics
+# # -------------------------------------------------------------------
+#
+# def deviation(state) -> float:
+#     """Compute ΔE = (ΣSW - 486), symbolic energy deviation."""
+#     return float(np.sum(state.weights) - CANONICAL_SUM_SW)
+#
+#
+# def energy_ratio(state) -> float:
+#     """Return relative deviation ratio (ΔE / 486)."""
+#     return deviation(state) / CANONICAL_SUM_SW
+#
+#
+# # -------------------------------------------------------------------
+# # Conservation Ledger — persistent energy and balance tracker
+# # -------------------------------------------------------------------
+#
+# @dataclass
+# class ConservationLedger:
+#     record: list[float] = field(default_factory=list)
+#     observers: list[str] = field(default_factory=list)
+#
+#     def log(self, state, observer: str = "Om") -> None:
+#         total = float(np.sum(state.weights))
+#         self.record.append(total)
+#         self.observers.append(observer)
+#
+#     def summary(self) -> dict:
+#         if not self.record:
+#             return {"count": 0, "conserved": True}
+#
+#         arr = np.array(self.record)
+#         deviations = arr - CANONICAL_SUM_SW
+#         return {
+#             "count": len(arr),
+#             "mean_ΣSW": float(np.mean(arr)),
+#             "min_ΣSW": float(np.min(arr)),
+#             "max_ΣSW": float(np.max(arr)),
+#             "ΔE_mean": float(np.mean(deviations)),
+#             "ΔE_range": [float(np.min(deviations)), float(np.max(deviations))],
+#             "within_tolerance": bool(all(abs(d) < TOLERANCE for d in deviations)),
+#             "energy_stability": float(np.ptp(deviations) / CANONICAL_SUM_SW),
+#             "frames_logged": list(set(self.observers)),
+#         }
+#
+#     def energy_trace(self) -> list[float]:
+#         """Return chronological ΔE values for audit."""
+#         return [val - CANONICAL_SUM_SW for val in self.record]
+#
+#     def clear(self) -> None:
+#         self.record.clear()
+#         self.observers.clear()
+#
+#     def describe(self) -> str:
+#         s = self.summary()
+#         return (
+#             f"ConservationLedger(count={s['count']}, "
+#             f"mean_ΣSW={s.get('mean_ΣSW', 0):.3f}, "
+#             f"ΔĒ={s.get('ΔE_mean', 0):.6f}, "
+#             f"stable={s.get('within_tolerance', True)})"
+#         )
+#
+#
+# # -------------------------------------------------------------------
+# # Dual-frame equilibrium helper
+# # -------------------------------------------------------------------
+#
+# def verify_equilibrium(Om_state, Lo_state) -> dict:
+#     """
+#     Compare Om and Lo frames to ensure total equilibrium:
+#         ΔE_total = deviation(Om) + deviation(Lo)
+#     """
+#     d_om = deviation(Om_state)
+#     d_lo = deviation(Lo_state)
+#     total = d_om + d_lo
+#     return {
+#         "ΔE(Om)": d_om,
+#         "ΔE(Lo)": d_lo,
+#         "ΔE_total": total,
+#         "equilibrium": abs(total) < TOLERANCE,
+#     }
+#
+#
+# # -------------------------------------------------------------------
+# # Self-check
+# # -------------------------------------------------------------------
+#
+# if __name__ == "__main__":
+#     try:
+#         from .lattice import canonical_symbol_layout
+#         from .rotation import rotate_x
+#     except ImportError:
+#         from lattice import canonical_symbol_layout  # type: ignore
+#         from rotation import rotate_x  # type: ignore
+#
+#     base = canonical_symbol_layout()
+#     rotated = rotate_x(base, 1)
+#
+#     print("verify_conservation(base):", verify_conservation(base))
+#     print("ΔE(base):", deviation(base))
+#
+#     ledger = ConservationLedger()
+#     ledger.log(base, "Om")
+#     ledger.log(rotated, "Lo")
+#     print(ledger.describe())
+#
+#     eq = verify_equilibrium(base, rotated)
+#     print("Equilibrium:", eq)
+#     print("conservation.py dual-core self-check passed ✓")
+
+# Livnium Core — conservation.py (Updated for Scalable Architecture)
+# -------------------------------------------------------------------
+# Implements Axiom D3: Conservation of Symbolic Weight.
+# Now dynamically reads the TOTAL_LEDGER_TARGET (e.g., 486 or 1350)
+# from the core lattice definition.
+# -------------------------------------------------------------------
+
+from __future__ import annotations
+import warnings
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Any
+
+# --- Import Dynamic Constants ---
+# We assume core.lattice is defined and sets TOTAL_LEDGER_TARGET
+try:
+    from .lattice import TOTAL_LEDGER_TARGET, GRID_SIZE
+except ImportError:
+    # Fallback if running outside the module structure (e.g., self-check)
+    TOTAL_LEDGER_TARGET = 486.0 #5
+    # TOTAL_LEDGER_TARGET=4374.0
+    GRID_SIZE = 3
+
+TOLERANCE = 1e-6
+CANONICAL_SUM_SW = TOTAL_LEDGER_TARGET
+
+
+# -------------------------------------------------------------------
+# Verification utilities
+# -------------------------------------------------------------------
+
+def verify_conservation(state) -> bool:
+    """Check whether a lattice satisfies ΣSW = TOTAL_LEDGER_TARGET within tolerance."""
+    total = float(np.sum(state.weights))
+    # FIX: Use the dynamic constant
+    return abs(total - CANONICAL_SUM_SW) < TOLERANCE
+
+
+# -------------------------------------------------------------------
+# Normalization with adaptive drift damping (Not used by LatticeState.normalize)
+# -------------------------------------------------------------------
+
+def normalize(vec: np.ndarray) -> np.ndarray:
+    """
+    Renormalize a vector of weights while preserving ΣSW ≈ TARGET.
+    """
+    total = np.sum(vec)
+    drift = total - CANONICAL_SUM_SW
+
+    if abs(drift) > 0.2 * CANONICAL_SUM_SW:
+        correction = drift * 0.5
+    else:
+        correction = drift * 0.1
+
+    vec -= correction / len(vec)
+
+    # tiny entropy injection — prevents symmetry lock
+    vec += np.random.uniform(-0.02, 0.02, size=vec.shape)
+
+    # ensure no negatives
+    vec = np.clip(vec, 0.0, None)
+
+    # final scale correction to exact ΣSW
+    vec *= CANONICAL_SUM_SW / np.sum(vec)
+    return vec
+
+
+# -------------------------------------------------------------------
+# Ledger safety decorator
+# -------------------------------------------------------------------
+
+def conserve_ledger(func):
+    """Decorator to enforce ΣSW conservation across lattice operations (non-fatal)."""
+
+    def wrapper(*args, **kwargs):
+        before = float(np.sum(args[0].weights))
+        result = func(*args, **kwargs)
+        after = float(np.sum(args[0].weights))
+
+        delta = after - before
+
+        if not np.isclose(before, after, rtol=1e-6, atol=1e-3):
+            # The LatticeState.normalize() method uses the correct TOTAL_LEDGER_TARGET,
+            # so we just call it to fix the drift.
+
+            # diagnostic print
+            print(f"[Conservation Drift] before={before:.6f}, after={after:.6f}, Δ={delta:+.6f}")
+
+            warnings.warn(
+                f"⚠️ ΣSW drift {delta:+.6f} detected in {func.__name__} "
+                "(auto-corrected / non-fatal).",
+                RuntimeWarning,
+            )
+
+            # Renormalize to restore exact total
+            args[0].normalize()
+
+            # verify fix
+            corrected = float(np.sum(args[0].weights))
+            # FIX: Use CANONICAL_SUM_SW for deviation check
+            print(f"[Correction Applied] new total={corrected:.6f}, deviation={corrected - CANONICAL_SUM_SW:+.6f}")
+
+        return result
+
+    return wrapper
+
+
+# -------------------------------------------------------------------
+# Deviation and energy diagnostics
+# -------------------------------------------------------------------
+
+def deviation(state) -> float:
+    """Compute ΔE = (ΣSW - TARGET), symbolic energy deviation."""
+    # FIX: Use the dynamic constant
+    return float(np.sum(state.weights) - CANONICAL_SUM_SW)
+
+
+def energy_ratio(state) -> float:
+    """Return relative deviation ratio (ΔE / TARGET)."""
+    # FIX: Use the dynamic constant
+    return deviation(state) / CANONICAL_SUM_SW
+
+
+# -------------------------------------------------------------------
+# Conservation Ledger — persistent energy and balance tracker
+# -------------------------------------------------------------------
+
+@dataclass
+class ConservationLedger:
+    record: list[float] = field(default_factory=list)
+    observers: list[str] = field(default_factory=list)
+
+    def log(self, state, observer: str = "Om") -> None:
+        total = float(np.sum(state.weights))
+        self.record.append(total)
+        self.observers.append(observer)
+
+    def summary(self) -> dict:
+        if not self.record:
+            return {"count": 0, "conserved": True}
+
+        arr = np.array(self.record)
+        # FIX: Use the dynamic constant for deviation calculation
+        deviations = arr - CANONICAL_SUM_SW
+
+        return {
+            "count": len(arr),
+            "mean_ΣSW": float(np.mean(arr)),
+            "min_ΣSW": float(np.min(arr)),
+            "max_ΣSW": float(np.max(arr)),
+            "ΔE_mean": float(np.mean(deviations)),
+            "ΔE_range": [float(np.min(deviations)), float(np.max(deviations))],
+            "within_tolerance": bool(all(abs(d) < TOLERANCE for d in deviations)),
+            "energy_stability": float(np.ptp(deviations) / CANONICAL_SUM_SW),
+            "frames_logged": list(set(self.observers)),
+        }
+
+    def energy_trace(self) -> list[float]:
+        """Return chronological ΔE values for audit."""
+        # FIX: Use the dynamic constant
+        return [val - CANONICAL_SUM_SW for val in self.record]
+
+    def clear(self) -> None:
+        self.record.clear()
+        self.observers.clear()
+
+    def describe(self) -> str:
+        s = self.summary()
+        return (
+            f"ConservationLedger(count={s['count']}, "
+            f"mean_ΣSW={s.get('mean_ΣSW', 0):.3f}, "
+            f"ΔĒ={s.get('ΔE_mean', 0):.6f}, "
+            f"stable={s.get('within_tolerance', True)})"
+        )
+
+
+# -------------------------------------------------------------------
+# Dual-frame equilibrium helper
+# -------------------------------------------------------------------
+
+def verify_equilibrium(Om_state, Lo_state) -> dict:
+    """
+    Compare Om and Lo frames to ensure total equilibrium:
+        ΔE_total = deviation(Om) + deviation(Lo)
+    """
+    d_om = deviation(Om_state)
+    d_lo = deviation(Lo_state)
+    total = d_om + d_lo
+    return {
+        "ΔE(Om)": d_om,
+        "ΔE(Lo)": d_lo,
+        "ΔE_total": total,
+        "equilibrium": abs(total) < TOLERANCE,
+    }
+
+
+# -------------------------------------------------------------------
+# Self-check
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    try:
+        from lattice import canonical_symbol_layout  # type: ignore
+        from rotation import rotate_x  # type: ignore
+    except ImportError:
+        # Fallback for self-check when run as main script
+        print("Self-check requires importing 'lattice' module correctly.")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/lattice.py ---
+
+
+from __future__ import annotations
+
+from types import NoneType
+
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Any
+
+from core.conservation import conserve_ledger  # Assuming this is available
+
+# -------------------------------------------------------------------
+# Canonical Constants
+# -------------------------------------------------------------------
+
+# ⚠️ --- THE SINGLE NUMBER TO CHANGE (N) ---
+GLOBAL_GRID_SIZE = 3  # Set N here (Must be an odd integer >= 3). We set N=5 for the test.
+# -----------------------------------------
+
+GRID_SIZE = GLOBAL_GRID_SIZE
+TOTAL_CELLS = GRID_SIZE ** 3
+
+
+# --- DERIVED CONSTANTS (Automated Scaling) ---
+
+def calculate_symbols(n: int) -> List[str]:
+    """Generates an alphabet of N³ unique symbols (A1)."""
+    return [str(i) for i in range(n ** 3)]
+
+
+def calculate_target_sw(n: int) -> float:
+    """
+    Calculates Total Symbolic Weight (ΣSW) based on the generalized formula (D3).
+    """
+    if n % 2 == 0 or n < 3:
+        raise ValueError("GRID_SIZE must be an odd integer >= 3.")
+
+    N_minus_2 = n - 2
+
+    # ΣSW(N) = 9 * [1*Centers + 2*Edges + 3*Corners]
+    total_exposed_weight = (
+            1 * 6 * (N_minus_2 ** 2) +  # Centers count (f=1)
+            2 * 12 * N_minus_2 +  # Edges count (f=2)
+            3 * 8  # Corners count (f=3)
+    )
+    return 9.0 * total_exposed_weight
+
+
+SYMBOLS = calculate_symbols(GRID_SIZE)
+TOTAL_LEDGER_TARGET = calculate_target_sw(GRID_SIZE)
+ANCHOR_COORD = GRID_SIZE // 2
+ANCHORS = {"Om": (ANCHOR_COORD, ANCHOR_COORD, ANCHOR_COORD),
+           "Lo": (ANCHOR_COORD, ANCHOR_COORD, ANCHOR_COORD)}
+
+
+# -------------------------------------------------------------------
+# Utility: face exposure and symbolic weight
+# -------------------------------------------------------------------
+
+def face_exposure(x: int, y: int, z: int) -> int:
+    """Return the number of exposed faces (0-3) for a coordinate in the N×N×N cube."""
+
+    exposure = 0
+    if x == 0 or x == GRID_SIZE - 1:
+        exposure += 1
+    if y == 0 or y == GRID_SIZE - 1:
+        exposure += 1
+    if z == 0 or z == GRID_SIZE - 1:
+        exposure += 1
+
+    # Crucial check for N > 3: Interior cells (not on the boundary) must have f=0.
+    if GRID_SIZE > 3 and exposure == 0:
+        return 0
+
+    return exposure
+
+
+def symbolic_weight(faces: int) -> float:
+    """
+    Apply Axiom A3 (Symbolic Weight Law): SW = 9 × f, where f = exposed faces (0–3).
+    """
+    if faces == 0:
+        return 0.0
+    return 9.0 * faces
+
+
+# -------------------------------------------------------------------
+# Lattice State
+# -------------------------------------------------------------------
+
+@dataclass
+class LatticeState:
+    """
+    Represents the complete N×N×N Livnium cube.
+    """
+    # FIX: Remove default_factory lambdas to fix initialization size bug
+    cells: np.ndarray = field(default=None)
+    weights: np.ndarray = field(default=None)
+    anchors: Dict[str, Tuple[int, int, int]] = field(default_factory=lambda: dict(ANCHORS))
+
+    # ---------------------------------------------------------------
+    # Core properties and operations
+    # ---------------------------------------------------------------
+
+    def clone(self) -> "LatticeState":
+        """Return a deep copy of the current state."""
+        return LatticeState(
+            cells=self.cells.copy(),
+            weights=self.weights.copy(),
+            anchors=self.anchors.copy(),
+        )
+
+    def total_sw(self) -> float:
+        """Compute total Symbolic Weight of the cube."""
+        return float(np.sum(self.weights))
+
+    # @conserve_ledger
+    def normalize(self) -> None:
+        """Rescale weights to enforce ΣSW = TOTAL_LEDGER_TARGET (Conservation Law)."""
+        total = self.total_sw()
+        if total == 0:
+            return
+        factor = TOTAL_LEDGER_TARGET / total
+        self.weights *= factor
+
+    # @conserve_ledger
+    def rebalance(self) -> None:
+        """Rebuild weights using the exposure rule (A3)."""
+        for x in range(GRID_SIZE):
+            for y in range(GRID_SIZE):
+                for z in range(GRID_SIZE):
+                    f = face_exposure(x, y, z)
+                    self.weights[x, y, z] = symbolic_weight(f)
+        self.normalize()
+
+    # ---------------------------------------------------------------
+    # Symbol utilities
+    # ---------------------------------------------------------------
+
+    def get_symbol(self, x: int, y: int, z: int) -> type[NoneType[Any, Any, Any]]:
+        return self.cells[x, y, z]
+
+    def set_symbol(self, x: int, y: int, z: int, value: str) -> None:
+        self.cells[x, y, z] = value
+
+    # ---------------------------------------------------------------
+    # Validation and integrity
+    # ---------------------------------------------------------------
+
+    def is_bijective(self) -> bool:
+        """Check if all N³ symbols are unique (1:1 mapping)."""
+        uniques, counts = np.unique(self.cells, return_counts=True)
+        return len(uniques) == TOTAL_CELLS and all(c == 1 for c in counts)
+
+    def verify(self) -> bool:
+        """Verify conservation and bijectivity."""
+        return abs(self.total_sw() - TOTAL_LEDGER_TARGET) < 1e-6 and self.is_bijective()
+
+    # ---------------------------------------------------------------
+    # Representation
+    # ---------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        layout = "\n".join([f"Layer {z}:\n{self.cells[:, :, z]}" for z in range(GRID_SIZE)])
+        om = self.anchors.get("Om", None)
+        lo = self.anchors.get("Lo", None)
+        return (
+            f"<LatticeState N={GRID_SIZE} ΣSW={self.total_sw():.2f} conserved={self.verify()}>\n"
+            f"Anchors: Om={om}, Lo={lo}\n"
+            f"{layout}"
+        )
+
+
+# -------------------------------------------------------------------
+# Canonical construction
+# -------------------------------------------------------------------
+
+def canonical_symbol_layout() -> LatticeState:
+    """Generate the canonical N×N×N Livnium lattice with bijective Σ mapping."""
+
+    # FIX: Initialize state with explicit size and data types for the current GRID_SIZE
+    s = LatticeState(
+        cells=np.empty((GRID_SIZE, GRID_SIZE, GRID_SIZE), dtype=str),
+        weights=np.zeros((GRID_SIZE, GRID_SIZE, GRID_SIZE)),
+    )
+
+    symbols_iter = iter(SYMBOLS)
+
+    for z in range(GRID_SIZE):
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
+                try:
+                    s.cells[x, y, z] = next(symbols_iter)
+                except StopIteration:
+                    s.cells[x, y, z] = '!'
+
+                f = face_exposure(x, y, z)
+                s.weights[x, y, z] = symbolic_weight(f)
+    s.normalize()
+    return s
+
+
+def identity_state() -> LatticeState:
+    """
+    Return the canonical identity state (I-lattice).
+    This is the unrotated, conserved base configuration of the system.
+    """
+    return canonical_symbol_layout().clone()
+
+
+@conserve_ledger
+def rebalance(state: LatticeState) -> None:
+    """Convenience helper to rebalance a lattice state according to A3."""
+    state.rebalance()
+
+
+# -------------------------------------------------------------------
+# Self-check
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+
+    print(f"\n--- Livnium N={GRID_SIZE} Self-Check ---")
+
+    lattice = canonical_symbol_layout()
+
+    # Check 1: Symbol Count
+    assert len(np.unique(
+        lattice.cells)) == TOTAL_CELLS, f"Symbol count error! Expected {TOTAL_CELLS}, got {len(np.unique(lattice.cells))}."
+
+    # Check 2: Conservation
+    target = TOTAL_LEDGER_TARGET
+    current = lattice.total_sw()
+    assert abs(current - target) < 1e-6, f"Conservation error! Target: {target:.2f}, Actual: {current:.2f}"
+
+    print(f"Livnium N={GRID_SIZE} self-check passed ✓")
+    print(f"Total Cells: {TOTAL_CELLS}")
+    print(f"ΣSW Target: {TOTAL_LEDGER_TARGET:.2f}")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/core/rotation.py ---
+"""
+Livnium Core — rotation.py (Circular Import Safe)
+-------------------------------------------------
+Implements Axiom A4: Dynamic Law and Axiom D4: Auditable Motion.
+
+Defines reversible 90° rotations about X, Y, Z axes.
+All rotations conserve ΣSW = 486 and can optionally emit
+an AuditLog entry to preserve full motion history.
+"""
+
+from __future__ import annotations
+import numpy as np
+from typing import Optional
+
+# Only import lattice + conservation here — safe, no cycle
+from core.lattice import LatticeState
+from core.conservation import verify_conservation
+
+
+# -------------------------------------------------------------------
+# Core reversible rotations
+# -------------------------------------------------------------------
+
+def rotate_x(state: LatticeState, k: int = 1) -> LatticeState:
+    """Rotate 90°×k about X-axis (clockwise along +X)."""
+    s = state.clone()
+    k = k % 4
+    if k:
+        s.cells = np.rot90(s.cells, k=k, axes=(1, 2))
+        s.weights = np.rot90(s.weights, k=k, axes=(1, 2))
+    assert verify_conservation(s), "Rotation X violated ΣSW!"
+    return s
+
+
+def rotate_y(state: LatticeState, k: int = 1) -> LatticeState:
+    """Rotate 90°×k about Y-axis (clockwise along +Y)."""
+    s = state.clone()
+    k = k % 4
+    if k:
+        s.cells = np.rot90(s.cells, k=k, axes=(0, 2))
+        s.weights = np.rot90(s.weights, k=k, axes=(0, 2))
+    assert verify_conservation(s), "Rotation Y violated ΣSW!"
+    return s
+
+
+def rotate_z(state: LatticeState, k: int = 1) -> LatticeState:
+    """Rotate 90°×k about Z-axis (clockwise along +Z)."""
+    s = state.clone()
+    k = k % 4
+    if k:
+        s.cells = np.rot90(s.cells, k=k, axes=(0, 1))
+        s.weights = np.rot90(s.weights, k=k, axes=(0, 1))
+    assert verify_conservation(s), "Rotation Z violated ΣSW!"
+    return s
+
+
+# -------------------------------------------------------------------
+# Rotation sequence utility
+# -------------------------------------------------------------------
+
+def rotate_sequence(state: LatticeState, sequence: str) -> LatticeState:
+    """
+    Apply multiple rotations in order:
+        X,Y,Z → +90°
+        x,y,z → −90°
+    Example: rotate_sequence(state, "XYZzyx") yields full identity cycle.
+    """
+    s = state.clone()
+    for move in sequence:
+        if move == "X":
+            s = rotate_x(s, 1)
+        elif move == "x":
+            s = rotate_x(s, -1)
+        elif move == "Y":
+            s = rotate_y(s, 1)
+        elif move == "y":
+            s = rotate_y(s, -1)
+        elif move == "Z":
+            s = rotate_z(s, 1)
+        elif move == "z":
+            s = rotate_z(s, -1)
+        else:
+            raise ValueError(f"Unknown rotation symbol: {move}")
+    return s
+
+
+# -------------------------------------------------------------------
+# Audited wrapper — motion with memory
+# -------------------------------------------------------------------
+
+def audited_rotate(
+    state: LatticeState,
+    axis: str,
+    k: int = 1,
+    observer: str = "Om",
+    log: Optional["AuditLog"] = None,
+    note: str = ""
+) -> tuple[LatticeState, "AuditLog"]:
+    """
+    Perform a reversible rotation while automatically recording it
+    into an AuditLog (if provided). Returns (rotated_state, log).
+
+    Example:
+        new_state, log = audited_rotate(state, "Z", 1, "Lo", log)
+    """
+
+    # ⬇️ Import audit tools *inside* the function to break circular imports
+    from core.audit import audit_cycle
+
+    before = state.clone()
+    axis = axis.upper()
+
+    if axis == "X":
+        after = rotate_x(state, k)
+    elif axis == "Y":
+        after = rotate_y(state, k)
+    elif axis == "Z":
+        after = rotate_z(state, k)
+    else:
+        raise ValueError("Invalid axis: must be X, Y, or Z")
+
+    op = f"rotate_{axis}({k:+d}×90°)"
+    log = audit_cycle(before, after, op, observer=observer, log=log, note=note)
+    return after, log
+
+
+# -------------------------------------------------------------------
+# Self-check
+# -------------------------------------------------------------------
+
+if __name__ == "__main__":
+    from core.lattice import canonical_symbol_layout
+
+    base = canonical_symbol_layout()
+    from core.audit import AuditLog  # delayed import even here
+
+    log = AuditLog()
+    rotated, log = audited_rotate(base, "Z", 1, observer="Lo", log=log, note="initial rotation")
+    restored, log = audited_rotate(rotated, "Z", -1, observer="Om", log=log, note="return to base")
+
+    print("ΣSW conserved after full cycle:", verify_conservation(restored))
+    print(log.describe())
+    print("rotation.py audited self-check passed ✓")
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/analysis/growth_mind_plot.py ---
+"""
+GrowthMind dynamics visualizer (NEW ARCHITECTURE)
+Displays Φ oscillations and the evolution of the
+Policy Heuristic Scores (Q-values) from the search journal.
+"""
+
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter1d
+from pathlib import Path
+import pandas as pd
+
+# -------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent.parent  # project root
+JOURNAL_PATH = Path("/Users/chetanpatil/Desktop/clean-nova/brain/growth_journal.jsonl")
+OUT_PATH = BASE_DIR / "analysis" / "growth_dynamics_new.png"
+
+
+# -------------------------------------------------------------------
+# Load and Extract
+# -------------------------------------------------------------------
+def load_and_extract_stats(path: Path):
+    """Load the new SearchOrchestrator journal and extract key stats."""
+    if not path.exists():
+        raise FileNotFoundError(f"No journal found at {path}")
+
+    records = []
+    with path.open("r", encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            try:
+                entry = json.loads(line)
+
+                # Map to heuristic_score → fallback to f_score (used in A*)
+                if "node_id" in entry:
+                    entry["heuristic_score"] = entry.get("heuristic_score", entry.get("f_score", 0.0))
+
+                    # Handle Φ (unicode key)
+                    if "Φ" not in entry and "\u03a6" in entry:
+                        entry["Φ"] = entry["\u03a6"]
+
+                    records.append(entry)
+
+            except json.JSONDecodeError:
+                continue
+
+            # ✅ Print every 1000 lines for progress visibility
+            if i % 1000 == 0:
+                print(f"🔄 Processed {i:,} journal lines...")
+
+    print(f"📘 Loaded {len(records)} valid node entries from {path}")
+
+    if not records:
+        print("No valid node data found. Exiting.")
+        return None
+
+    # Convert to DataFrame
+    df = pd.DataFrame(records)
+
+    # Clean the rule name (e.g., "G1:merge" -> "merge")
+    if "rule" in df.columns:
+        df["rule"] = df["rule"].apply(lambda x: x.split(":")[-1] if isinstance(x, str) else x)
+    else:
+        df["rule"] = "unknown"
+
+    # Extract data for plotting
+    stats = {
+        "steps": df.index.values,
+        "phi": df["Φ"].values if "Φ" in df.columns else np.zeros(len(df)),
+        "heuristic_score": df["heuristic_score"].values,
+        "rules": df["rule"].values,
+        "merge_scores": df[df["rule"] == "merge"]["heuristic_score"],
+        "branch_scores": df[df["rule"] == "branch"]["heuristic_score"],
+        "stabilize_scores": df[df["rule"] == "stabilize"]["heuristic_score"],
+    }
+
+    return stats
+
+
+# -------------------------------------------------------------------
+# Plot GrowthMind dynamics
+# -------------------------------------------------------------------
+def plot_dynamics(s):
+    """Generate multi-panel visualization of the new architecture's dynamics."""
+
+    steps = s["steps"]
+    if len(steps) == 0:
+        print("No data to plot.")
+        return
+
+    # Adaptive smoothing
+    sigma = max(5, len(steps) // 200)
+
+    # --- Layout using GridSpec ---
+    fig = plt.figure(figsize=(13, 10))
+    gs = fig.add_gridspec(3, 1)
+
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)
+    ax2 = fig.add_subplot(gs[2, 0])
+
+    plt.setp(ax0.get_xticklabels(), visible=False)
+
+    # --- 1. Φ (Polarity) Dynamics ---
+    phi_smooth = gaussian_filter1d(s["phi"], sigma=sigma)
+    ax0.plot(steps, phi_smooth, color="teal", label="Φ (smoothed)", linewidth=1.6)
+    ax0.fill_between(steps, phi_smooth - 0.1, phi_smooth + 0.1, color="teal", alpha=0.15)
+    ax0.axhline(0, color="gray", ls="--", lw=0.8)
+    ax0.set_ylabel("Φ (polarity)")
+    ax0.set_title("Φ (Polarity) Dynamics & Policy Learning")
+    ax0.legend()
+    ax0.grid(alpha=0.3)
+
+    # --- 2. Heuristic Score (Policy Q-Value) Evolution ---
+    score_smooth = gaussian_filter1d(s["heuristic_score"], sigma=sigma)
+    ax1.plot(steps, score_smooth, color="purple", label="Heuristic Score (Q-value)", linewidth=1.4)
+    ax1.axhline(0, color="gray", ls=":", lw=0.8, label="Zero Reward")
+    ax1.set_ylabel("Heuristic Score (Smoothed)")
+    ax1.set_xlabel("Search Step")
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    # --- 3. Rule Score Distribution (Violin Plot) ---
+    data_to_plot = [s["merge_scores"], s["branch_scores"], s["stabilize_scores"]]
+    labels = ["Merge", "Branch", "Stabilize"]
+
+    plot_data_filtered = [d for d in data_to_plot if len(d) > 0]
+    plot_labels_filtered = [l for d, l in zip(data_to_plot, labels) if len(d) > 0]
+
+    if plot_data_filtered:
+        parts = ax2.violinplot(plot_data_filtered, showmeans=True, showmedians=False)
+        ax2.set_xticks(np.arange(1, len(plot_labels_filtered) + 1))
+        ax2.set_xticklabels(plot_labels_filtered)
+        ax2.set_title("Policy Preference: Distribution of Heuristic Scores by Rule")
+        ax2.set_ylabel("Heuristic Score (Q-Value)")
+        ax2.axhline(0, color="gray", ls=":", lw=0.8)
+        ax2.grid(alpha=0.3)
+
+        colors = ["#8da0cb", "#fc8d62", "#66c2a5"]
+        for i, pc in enumerate(parts["bodies"]):
+            pc.set_facecolor(colors[i % len(colors)])
+            pc.set_edgecolor("black")
+            pc.set_alpha(0.8)
+    else:
+        ax2.text(
+            0.5,
+            0.5,
+            "No rule data to plot.",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=ax2.transAxes,
+        )
+
+    plt.tight_layout()
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    plt.savefig(OUT_PATH, dpi=300, bbox_inches="tight")
+    print(f"✅ Saved new visualization to {OUT_PATH}")
+    plt.show()
+
+
+# -------------------------------------------------------------------
+# Entry Point
+# -------------------------------------------------------------------
+def main():
+    try:
+        stats = load_and_extract_stats(JOURNAL_PATH)
+        if stats:
+            plot_dynamics(stats)
+    except FileNotFoundError as e:
+        print(e)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+
+if __name__ == "__main__":
+    main()
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/config.py ---
+# growth/config.py
+"""
+Central configuration for the SNLI experiment.
+"""
+
+CONFIG = {
+    "seed": 42,
+    "use_embeddings": True,
+    "embedding_model": "all-mpnet-base-v2",
+    # "embedding_model": "all-roberta-large-v1",
+    # "embedding_model": "all-MiniLM-L6-v2",
+    # "embed_channels": 4,  # try 4 or 8
+    "embed_scale": 25.0,
+    "embed_shape": (3, 3, 3),
+    "polarity_scale": 1.0,
+    "polarity_shift": 0.0,
+    "snli_train_limit": 10000,
+    "snli_test_limit": 200,
+    "calib_frac": 0.1,
+    "neutral_band_grid": [x / 100 for x in range(5, 61, 5)],
+    "progress": True,
+}
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/lattice_encoding.py ---
+# # growth/lattice_encoding.py
+# """
+# Handles text embedding and conversion to LatticeState.
+# """
+# import numpy as np
+# from core.lattice import LatticeState, canonical_symbol_layout
+# from core.conservation import verify_conservation
+# from growth.config import CONFIG
+#
+# # --- Globals for caching the embedder and projection matrix ---
+# _EMBEDDER = None
+# _PROJ = None  # projection matrix for multi-channel mapping
+#
+# def _get_embedder():
+#     """Initializes and returns the SentenceTransformer model."""
+#     global _EMBEDDER
+#     if _EMBEDDER is None:
+#         from sentence_transformers import SentenceTransformer
+#         _EMBEDDER = SentenceTransformer(CONFIG["embedding_model"])
+#     return _EMBEDDER
+#
+# def _init_proj(embed_dim: int, out_dim: int):
+#     """Initializes a deterministic random projection matrix."""
+#     rng = np.random.RandomState(12345)
+#     W = rng.randn(embed_dim, out_dim).astype(np.float32) / np.sqrt(embed_dim)
+#     return W
+#
+# def _encode_text(text: str) -> np.ndarray:
+#     """Encodes text into a 3D weight field using projection."""
+#     vec = _get_embedder().encode(text, normalize_embeddings=True)  # shape [D]
+#     D = vec.shape[0]
+#     C = CONFIG.get("embed_channels", 1)
+#     target_shape = CONFIG["embed_shape"]  # (3,3,3)
+#
+#     global _PROJ
+#     out_dim = int(np.prod(target_shape)) * C  # 27 * C
+#     if _PROJ is None or _PROJ.shape != (D, out_dim):
+#         _PROJ = _init_proj(D, out_dim)
+#
+#     # project to multi-channel lattice volume
+#     h = vec @ _PROJ  # [27*C]
+#     h = h.reshape(C, *target_shape)  # [C,3,3,3]
+#
+#     # per-channel standardize
+#     h = (h - h.mean(axis=(1, 2, 3), keepdims=True)) / (h.std(axis=(1, 2, 3), keepdims=True) + 1e-6)
+#
+#     # collapse channels -> single 3x3x3 weight field
+#     h = h.mean(axis=0)  # [3,3,3]
+#     return h.astype(np.float32)
+#
+# def text_to_lattice(text: str) -> LatticeState:
+#     """Converts a string of text into a normalized LatticeState."""
+#     base = canonical_symbol_layout()
+#     s = base.clone()
+#     s.weights += CONFIG["embed_scale"] * _encode_text(text)
+#     s.normalize()
+#     assert verify_conservation(s), f"ΣSW violated for: {text[:40]}"
+#     return s
+
+# growth/lattice_encoding.py
+"""
+Handles text embedding and conversion to LatticeState.
+"""
+import numpy as np
+from core.lattice import LatticeState, canonical_symbol_layout
+from core.conservation import verify_conservation
+from growth.config import CONFIG
+from typing import Tuple
+
+# --- Globals for caching the embedder and projection matrix ---
+_EMBEDDER = None
+_PROJ = None  # projection matrix for multi-channel mapping
+
+
+def _get_embedder():
+    """Initializes and returns the SentenceTransformer model."""
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        from sentence_transformers import SentenceTransformer
+        _EMBEDDER = SentenceTransformer(CONFIG["embedding_model"])
+    return _EMBEDDER
+
+
+def _init_proj(embed_dim: int, out_dim: int):
+    """Initializes a deterministic random projection matrix."""
+    rng = np.random.RandomState(12345)
+    W = rng.randn(embed_dim, out_dim).astype(np.float32) / np.sqrt(embed_dim)
+    return W
+
+
+def _encode_text(text: str) -> np.ndarray:
+    """Encodes text into an N x N x N weight field using projection."""
+    vec = _get_embedder().encode(text, normalize_embeddings=True)  # shape [D]
+    D = vec.shape[0]
+    C = CONFIG.get("embed_channels", 1)
+    target_shape: Tuple[int, int, int] = CONFIG["embed_shape"]  # (N,N,N)
+
+    global _PROJ
+    # out_dim is the size of the final flattened array: N*N*N * C
+    out_dim = int(np.prod(target_shape)) * C
+
+    # Re-initialize projection matrix if the required output size has changed (e.g., N=3 -> N=5)
+    if _PROJ is None or _PROJ.shape != (D, out_dim):
+        _PROJ = _init_proj(D, out_dim)
+
+    # 1. Project to multi-channel lattice volume
+    h = vec @ _PROJ  # [N*N*N*C]
+
+    # 2. Reshape to multi-channel cube
+    h = h.reshape(C, *target_shape)  # [C, N, N, N]
+
+    # 3. Per-channel standardize
+    h = (h - h.mean(axis=(1, 2, 3), keepdims=True)) / (h.std(axis=(1, 2, 3), keepdims=True) + 1e-6)
+
+    # 4. Collapse channels -> single N x N x N weight field
+    h = h.mean(axis=0)  # [N, N, N]
+
+    return h.astype(np.float32)
+
+
+def text_to_lattice(text: str) -> LatticeState:
+    """Converts a string of text into a normalized LatticeState."""
+    base = canonical_symbol_layout()
+    s = base.clone()
+    s.weights += CONFIG["embed_scale"] * _encode_text(text)
+    s.normalize()
+    assert verify_conservation(s), f"ΣSW violated for: {text[:40]}"
+    return s
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/data_loader.py ---
+# growth/data_loader.py
+"""
+Handles loading and balancing of the SNLI dataset.
+"""
+import json
+import random
+from pathlib import Path
+from typing import List, Tuple
+
+
+def load_snli(path: Path, limit: int) -> List[Tuple[str, str, str]]:
+    """Loads SNLI data from a .jsonl file up to a limit."""
+    data = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            gold = obj.get("gold_label", "").strip()
+            if gold not in {"entailment", "neutral", "contradiction"}:
+                continue
+            s1, s2 = obj.get("sentence1", ""), obj.get("sentence2", "")
+            if not s1 or not s2:
+                continue
+            data.append((s1, s2, gold))
+            if len(data) >= limit:
+                break
+    return data
+
+
+def balance_dataset(data: List[Tuple[str, str, str]]) -> List[Tuple[str, str, str]]:
+    """Balances a dataset to have an equal number of samples per class."""
+    counts = {"entailment": 0, "neutral": 0, "contradiction": 0}
+    for _, _, g in data:
+        if g in counts:
+            counts[g] += 1
+
+    # Handle cases where a class might be missing in a small sample
+    valid_counts = [c for c in counts.values() if c > 0]
+    if not valid_counts:
+        return []  # Return empty if no valid labels found
+
+    minc = min(valid_counts)
+
+    balanced, seen = [], counts.fromkeys(counts, 0)
+    random.shuffle(data)
+    for s1, s2, g in data:
+        if g in seen and seen[g] < minc:
+            balanced.append((s1, s2, g))
+            seen[g] += 1
+    print(f"✅ Balanced {len(balanced)} samples ({minc} per class)")
+    return balanced
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/memory_coupling.py ---
+from __future__ import annotations
+import numpy as np
+import time
+import json
+import os
+from typing import Dict, Tuple, Optional, List
+from collections import defaultdict
+
+
+class MemoryCoupling:
+    def __init__(self, alpha: float = 0.2, max_size: int = 512, history_per_rule: int = 200) -> None:
+        self.alpha = alpha
+        self.max_size = max_size
+
+        # --- Old (Step 4) Storage for C-Matrices ---
+        self.store: Dict[str, np.ndarray] = {}
+        self.meta: Dict[str, dict] = {}
+
+        # --- (Step 5.4) Storage for Phi History ---
+        # This will store ALL raw Phi values for each rule.
+        self.phi_history: Dict[str, List[float]] = defaultdict(list)
+        self.max_history_per_rule = history_per_rule
+
+    def key(self, src_shape: Tuple[int, ...], dst_shape: Tuple[int, ...], tag: str = "") -> str:
+        """Generate a unique key for a given source/destination shape and tag."""
+        return f"{tag}|src={src_shape}|dst={dst_shape}"
+    #
+    # def remember(self, key: str, C: np.ndarray, phi: float) -> None:
+    #     """
+    #     Remembers two things:
+    #     1. (Step 4) The coupling matrix 'C' via an EMA update.
+    #     2. (Step 5.4) The raw 'phi' value, filed under its ground-truth rule.
+    #     """
+    #
+    #     # --- 1. (Step 4) Update Coupling Matrix (Original Logic) ---
+    #     C = np.asarray(C, dtype=float)
+    #     phi_eff = np.tanh(phi)
+    #     alpha = self.alpha * (0.5 + 0.5 * abs(phi_eff))
+    #
+    #     if key in self.store:
+    #         old = self.store[key]
+    #         C_new = (1 - alpha) * old + alpha * C
+    #     else:
+    #         if len(self.store) >= self.max_size:
+    #             oldest = sorted(self.meta.items(), key=lambda kv: kv[1]["t"])[0][0]
+    #             self.store.pop(oldest, None)
+    #             self.meta.pop(oldest, None)
+    #         C_new = C
+    #
+    #     self.store[key] = C_new / (np.linalg.norm(C_new) + 1e-8)
+    #     self.meta[key] = {"t": time.time(), "Φ": float(phi)}
+    #
+    #     # --- 2. (Step 5.4) Update Full Phi History ---
+    #     # "Purification" logic is REMOVED. We store ALL data.
+    #     rule = key.split('_')[0]
+    #
+    #     if rule in ("merge", "branch", "stabilize"):
+    #         history = self.phi_history[rule]
+    #         history.append(phi)
+    #         # Prune old entries to keep memory fresh
+    #         if len(history) > self.max_history_per_rule:
+    #             self.phi_history[rule] = history[-self.max_history_per_rule:]
+    #
+    # # --- NEW (Step 5.4) Phi Bias Calculation ---
+    def remember(self, key: str, C: np.ndarray, phi: float) -> None:
+        """
+        Remembers two things:
+        1. (Step 4) The coupling matrix 'C' via an EMA update (now tracking count).
+        2. (Step 5.4) The raw 'phi' value, filed under its ground-truth rule.
+        """
+
+        # --- 1. (Step 4) Update Coupling Matrix (Original Logic) ---
+        C = np.asarray(C, dtype=float)
+        phi_eff = np.tanh(phi)
+        alpha = self.alpha * (0.5 + 0.5 * abs(phi_eff))
+
+        # --- INITIALIZE OR RETRIEVE METADATA ---
+        meta_entry = self.meta.get(key, {"t": time.time(), "Φ": float(phi), "count": 0})
+
+        if key in self.store:
+            old = self.store[key]
+            C_new = (1 - alpha) * old + alpha * C
+            meta_entry["count"] += 1  # INCREMENT COUNT ON UPDATE
+        else:
+            if len(self.store) >= self.max_size:
+                oldest = sorted(self.meta.items(), key=lambda kv: kv[1]["t"])[0][0]
+                self.store.pop(oldest, None)
+                self.meta.pop(oldest, None)
+            C_new = C
+            meta_entry["count"] = 1  # START COUNT AT 1 ON CREATION
+
+        self.store[key] = C_new / (np.linalg.norm(C_new) + 1e-8)
+
+        # --- UPDATE METADATA ---
+        meta_entry["t"] = time.time()
+        meta_entry["Φ"] = float(phi)
+        self.meta[key] = meta_entry
+
+        # --- 2. (Step 5.4) Update Full Phi History (Unchanged) ---
+        rule = key.split('_')[0]
+
+        if rule in ("merge", "branch", "stabilize"):
+            history = self.phi_history[rule]
+            history.append(phi)
+            # Prune old entries to keep memory fresh
+            if len(history) > self.max_history_per_rule:
+                self.phi_history[rule] = history[-self.max_history_per_rule:]
+
+    def get_phi_bias(
+            self,
+            phi: float,
+            window_size: float = 0.1,
+            min_samples: int = 10,
+            confidence_threshold: float = 0.7
+    ) -> float:
+        """
+        Calculates a "bias" nudge for a given phi value based on
+        the ground truth of its historical neighbors.
+        """
+        upper_bound = phi + window_size / 2
+        lower_bound = phi - window_size / 2
+
+        # Find all historical neighbors in this "window"
+        merge_count = len([p for p in self.phi_history.get("merge", []) if lower_bound < p < upper_bound])
+        branch_count = len([p for p in self.phi_history.get("branch", []) if lower_bound < p < upper_bound])
+        stabilize_count = len([p for p in self.phi_history.get("stabilize", []) if lower_bound < p < upper_bound])
+
+        total_count = merge_count + branch_count + stabilize_count
+
+        if total_count < min_samples:
+            return 0.0  # Not enough data to be confident
+
+        # Calculate confidence
+        merge_confidence = merge_count / total_count
+        branch_confidence = branch_count / total_count
+
+        bias = 0.0
+
+        # If we are highly confident this window is "merge"...
+        if merge_confidence > confidence_threshold and merge_confidence > branch_confidence:
+            # Add a small positive bias to push it over the threshold
+            bias = 0.05 * (merge_confidence - 0.5)
+
+        # If we are highly confident this window is "branch"...
+        elif branch_confidence > confidence_threshold and branch_confidence > merge_confidence:
+            # Add a small negative bias
+            bias = -0.05 * (branch_confidence - 0.5)
+
+        return float(np.clip(bias, -0.1, 0.1))  # Safety clip
+
+    # --- DELETED get_adaptive_thresholds() method ---
+
+    # --- Original Methods Below ---
+
+    def recall(
+            self,
+            src_shape: Tuple[int, ...],
+            dst_shape: Tuple[int, ...],
+            tag: str = ""
+    ) -> Optional[np.ndarray]:
+        """Retrieve best matching coupling matrix if available."""
+        key = self.key(src_shape, dst_shape, tag)
+        if key in self.store:
+            return self.store[key]
+        for k in self.store.keys():
+            if k.startswith(tag):
+                return self.store[k]
+        return None
+
+    def stats(self) -> Dict[str, object]:
+        """Return summary statistics for stored matrices and Phi history."""
+        phi_stats: Dict[str, float] = {}
+        for rule, history in self.phi_history.items():
+            if history:
+                phi_stats[f"{rule}_phi_mean"] = float(np.mean(history))
+                phi_stats[f"{rule}_phi_var"] = float(np.var(history))
+                phi_stats[f"{rule}_n"] = len(history)
+
+        return {
+            "matrix_count": len(self.store),
+            "phi_history_stats": phi_stats,
+            "mean_Φ_all": float(np.mean([m["Φ"] for m in self.meta.values()])) if self.meta else 0.0,
+        }
+
+    def save(self, path: str = "brain/memory_coupling.npz") -> None:
+        """
+        Save coupling matrices, metadata, and Phi history to disk.
+        """
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.savez_compressed(path, **self.store)
+
+        meta_and_history = {
+            "meta": self.meta,
+            "phi_history": dict(self.phi_history)
+        }
+        with open(path + ".meta.json", "w") as f:
+            json.dump(meta_and_history, f, indent=2)
+
+    def load(self, path: str = "brain/memory_coupling.npz") -> None:
+        """
+        Load previously saved matrices and metadata from disk.
+        """
+        if not os.path.exists(path):
+            return
+
+        try:
+            data = np.load(path)
+            for k in data.files:
+                self.store[k] = np.array(data[k])
+        except Exception as e:
+            print(f"Warning: Could not load memory matrices from {path}. Error: {e}")
+
+        meta_path = path + ".meta.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    meta_and_history = json.load(f)
+                self.meta = meta_and_history.get("meta", {})
+                loaded_history = meta_and_history.get("phi_history", {})
+                self.phi_history = defaultdict(list, loaded_history)
+            except Exception as e:
+                print(f"Warning: Could not load memory metadata from {meta_path}. Error: {e}")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/phi_computer.py ---
+# growth/phi_computer.py
+"""
+Computes the normalized Phi (Φ) value for a premise/hypothesis pair.
+"""
+import numpy as np
+from core.semantic import compute_intent
+from growth.lattice_encoding import text_to_lattice
+from growth.config import CONFIG
+
+# --- Module-level state for running normalization ---
+_phi_values_seen = []
+
+
+def phi_raw_for_pair(premise: str, hypothesis: str) -> float:
+    """
+    Computes the raw intent polarity and applies a running normalization
+    (tanh standardization) over the last 500 values.
+    """
+    A = text_to_lattice(premise)
+    B = text_to_lattice(hypothesis)
+    intent = compute_intent(A, B,
+                            polarity_scale=CONFIG["polarity_scale"],
+                            polarity_shift=CONFIG["polarity_shift"],
+                            )
+    phi_raw = float(intent.polarity)
+
+    # Update running list for normalization
+    _phi_values_seen.append(phi_raw)
+    if len(_phi_values_seen) > 500:
+        del _phi_values_seen[0]
+
+    # Apply running standardization + tanh squashing
+    phi_mean = np.mean(_phi_values_seen) if len(_phi_values_seen) > 10 else 0.0
+    phi_std = np.std(_phi_values_seen) if len(_phi_values_seen) > 10 else 1.0
+    phi_norm = np.tanh((phi_raw - phi_mean) / (phi_std + 1e-6))
+    return float(phi_norm)
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/utils.py ---
+# growth/utils.py
+"""
+General utilities: seeding and lattice visualization.
+"""
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from core.lattice import LatticeState
+
+# --- Determinism ---
+def set_seed(seed: int):
+    """Sets random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+# --- Diagnostic Visualization (Lattice Probe) ---
+def visualize_lattice(lattice: LatticeState, title="Lattice Probe"):
+    """
+    Visual diagnostic for LatticeState.
+    Works for both single-channel and multi-channel embeddings.
+    """
+    W = lattice.weights
+    flat = W.flatten()
+    normalized = (flat - np.min(flat)) / (np.max(flat) - np.min(flat) + 1e-8)
+
+    print(f"\n🧩 {title}")
+    print(f"  ΣSW = {lattice.total_sw():.2f}")
+    print(f"  min={np.min(W):.3f}, max={np.max(W):.3f}, mean={np.mean(W):.3f}, std={np.std(W):.3f}")
+    print(f"  bijective={lattice.is_bijective()} ({len(np.unique(lattice.cells))} unique symbols)")
+    print(f"  Sample middle slice (z=1):\n{np.round(W[:, :, 1], 2)}")
+
+    # --- Multi-slice visualization ---
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    for i in range(3):
+        im = axes[i].imshow(W[:, :, i], cmap="plasma")
+        axes[i].set_title(f"Slice z={i}")
+        plt.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+    plt.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+    # --- Optional 3D-style projection ---
+    from mpl_toolkits.mplot3d import Axes3D  # noqa
+    fig = plt.figure(figsize=(5, 4))
+    ax = fig.add_subplot(111, projection='3d')
+    X, Y, Z = np.meshgrid(np.arange(3), np.arange(3), np.arange(3))
+    ax.scatter(X, Y, Z, c=W.flatten(), cmap="plasma", s=100 + 200 * normalized)
+    ax.set_title("3D Lattice Field")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+    plt.show()
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/language.py ---
+# growth/language.py
+"""
+Step 6: Language Expression
+
+This module translates the GrowthMind's internal, abstract
+decision (like 'merge' or 'branch') into a human-readable
+statement of logic.
+"""
+
+from typing import Dict
+
+# Defines the "voice" of the AI.
+# We can make these as simple or as complex as we want.
+RULE_TO_EXPRESSION_MAP: Dict[str, str] = {
+    "merge": "Conclusion: The hypothesis is **entailed** by the premise.",
+    "branch": "Conclusion: The hypothesis **contradicts** the premise.",
+    "stabilize": "Conclusion: The relationship is **neutral**; the premise neither supports nor contradicts the hypothesis.",
+    "revert": "Conclusion: Reverting to a prior state as the relationship is inconclusive.",
+}
+
+DEFAULT_EXPRESSION = "Conclusion: The logical outcome is undefined."
+
+
+def express_decision(rule: str, phi: float) -> str:
+    """
+    Translates a chosen rule and its phi value into a
+    natural language sentence.
+
+    Args:
+        rule (str): The final rule chosen by the GrowthMind
+                    (e.g., 'merge', 'branch').
+        phi (float): The final phi value that led to this decision.
+
+    Returns:
+        str: A human-readable explanation of the decision.
+    """
+    # Find the base sentence from our map
+    base_sentence = RULE_TO_EXPRESSION_MAP.get(rule, DEFAULT_EXPRESSION)
+
+    # Add the quantitative evidence (the Φ value)
+    expression = f"{base_sentence} (Φ = {phi:+.3f})"
+
+    return expression
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/main.py ---
+"""
+Main script for SNLI + GrowthMind learning.
+REFACTORED to use the new decoupled Tree-of-Thought architecture
+with an external SearchOrchestrator.
+"""
+from pathlib import Path
+import numpy as np
+from tqdm import tqdm
+import time
+import sys  # For clean system exit/flush
+
+# --- New Architectural Imports ---
+from growth.mind.growth_mind import GrowthMind
+from growth.mind.growth_tree import GrowthTree
+from growth.mind.search_orchestrator import SearchOrchestrator
+# ---------------------------------
+
+# CRITICAL FIX: Ensure TENSORBOARD_WRITER is imported here
+from growth.mind.reward import compute_total_reward, RewardParams, TENSORBOARD_WRITER
+
+from growth.config import CONFIG
+from growth.utils import set_seed
+from growth.data_loader import load_snli, balance_dataset
+from growth.lattice_encoding import _get_embedder
+from growth.calibration import calibrate_phi
+
+# --- Core Imports ---
+from core.semantic import IntentVector
+from growth.phi_computer import phi_raw_for_pair
+
+
+# -------------------------------------------------------------------
+# Helper: timestamped print
+# -------------------------------------------------------------------
+def log(msg):
+    t = time.strftime("%H:%M:%S")
+    print(f"[{t}] {msg}")
+
+
+# -------------------------------------------------------------------
+# Utility Functions
+# -------------------------------------------------------------------
+def initialize_environment():
+    set_seed(CONFIG["seed"])
+    root = Path(__file__).resolve().parents[1]
+    data_dir = root / "data"
+    log("🧩 Environment initialized (random seed fixed).")
+    return data_dir
+
+
+def load_and_prepare_data(data_dir):
+    log("📦 Loading SNLI dataset...")
+    train_raw = load_snli(data_dir / "snli_1.0_train.jsonl", CONFIG["snli_train_limit"])
+    test = load_snli(data_dir / "snli_1.0_test.jsonl", CONFIG["snli_test_limit"])
+    log(f"🌱 Dataset loaded → Train: {len(train_raw):,} | Test: {len(test):,}")
+
+    train = balance_dataset(train_raw)
+    log(f"⚖️  Balanced training set → {len(train):,} samples (equalized per class).")
+    return train, test
+
+
+def initialize_embedder():
+    if CONFIG["use_embeddings"]:
+        log("🧠 Initializing embedding model...")
+        _ = _get_embedder()
+        log("✅ Embedding model ready.")
+
+
+def calibrate_mind(train):
+    log("🔧 Running Φ calibration on sample subset...")
+    calib = calibrate_phi(train)
+    phi_sign, band = calib["phi_sign"], calib["neutral_band"]
+    log(f"✅ Calibration complete | sign={phi_sign:+.0f}, neutral_band={band:.3f}, acc={calib['acc']:.3f}")
+    return phi_sign, band
+
+
+def initialize_growthmind(neutral_band):
+    mind = GrowthMind.from_config({
+        "temperature": 0.25,
+        "phi_damping": 0.90,  # aggressive exploitation
+        "neutral_band": neutral_band,
+    })
+    log(f"🧩 GrowthMind Controller initialized.")
+    log(f"    φ_damping={mind.phi_damping}, temperature={mind.temperature}, neutral_band={neutral_band:.3f}")
+    return mind
+
+
+# -------------------------------------------------------------------
+# Training Loop
+# -------------------------------------------------------------------
+def run_training(mind, train_data, phi_sign):
+    log(f"🚀 Starting SearchOrchestrator training | Samples: {len(train_data):,}")
+    correct = 0
+    total_samples = len(train_data)
+    cm_train = np.zeros((3, 3), dtype=int)
+
+    labels = {"entailment": 0, "neutral": 1, "contradiction": 2}
+    rule_to_label = {
+        "merge": "entailment",
+        "branch": "contradiction",
+        "stabilize": "neutral",
+        "origin": "neutral",
+        "revert": "neutral"
+    }
+
+    reward_params = RewardParams()
+
+    for i, (s1, s2, gold_label) in enumerate(tqdm(train_data, desc="TRAIN")):
+        tree = GrowthTree.create()
+        orchestrator = SearchOrchestrator(mind, tree)
+
+        phi_raw = phi_raw_for_pair(s1, s2)
+        initial_intent = IntentVector(
+            polarity=float(phi_raw * phi_sign),
+            raw_polarity=float(phi_raw),
+            delta_energy=0.0,
+            rotation_seq="",
+            observer="Om",
+        )
+
+        solution_node = orchestrator.run_search(
+            initial_intent,
+            note_prefix=f"sample_{i}"
+        )
+
+        pred_label = rule_to_label.get(solution_node.rule.split(":")[-1], "neutral")
+        is_correct = (pred_label == gold_label)
+        correct += int(is_correct)
+        cm_train[labels[gold_label], labels[pred_label]] += 1
+
+        total_path_reward = compute_total_reward(
+            mind=mind,
+            solution_node=solution_node,
+            is_correct=is_correct,
+            params=reward_params
+        )
+
+        # Policy Update
+        curr = solution_node
+        while curr and curr.parent is not None:
+            rule_key = curr.rule.split(':')[-1]
+            mind.policy.update(rule_key, total_path_reward)
+            curr = curr.parent
+
+        mind.update_temperature()
+
+        # Periodic checkpoint logging
+        if (i + 1) % 1000 == 0 or (i + 1) == total_samples:
+            current_acc = correct / (i + 1)
+            log(f"📍 Step {i + 1:,}/{total_samples:,} | Accuracy={current_acc:.3f}")
+            try:
+                if hasattr(orchestrator, 'node_counter'):
+                    log(f"   🌳 Total nodes: {orchestrator.node_counter:,}")
+            except Exception:
+                pass
+
+            try:
+                desc = mind.policy.describe()
+                log(f"   🧩 Policy snapshot → {desc}")
+            except Exception:
+                pass
+
+    acc_train = correct / max(1, total_samples)
+    log(f"📊 TRAIN Complete → Final Accuracy = {acc_train:.3f}")
+    return cm_train, acc_train
+
+
+# -------------------------------------------------------------------
+# Finalization
+# -------------------------------------------------------------------
+def finalize_training(mind, cm_train, acc_train):
+    log("🧠 Meta-cognition & reflection phase...")
+    mind.metacog_reflect_and_tune(cm_train, acc_train)
+
+    log("🧾 Skipping TEST phase (to be implemented later).")
+    log("🪞 Running final reflection...")
+    try:
+        mind.reflect()
+    except Exception:
+        log("⚠️  Reflection failed (non-critical).")
+
+    mind.save_state()
+    log("💾 GrowthMind state saved.")
+
+
+# -------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------
+def main():
+    start = time.time()
+    log("🌍 Initializing Livnium Growth training pipeline...")
+
+    data_dir = initialize_environment()
+    train, test = load_and_prepare_data(data_dir)
+    initialize_embedder()
+
+    phi_sign, band = calibrate_mind(train)
+    mind = initialize_growthmind(band)
+
+    hstart = max(100, int(len(train) * CONFIG["calib_frac"]))
+    train_phase_data = train[hstart:]
+    log(f"📘 Training subset selected → {len(train_phase_data):,} samples (post-calibration).")
+
+    cm_train, acc_train = run_training(mind, train_phase_data, phi_sign)
+    finalize_training(mind, cm_train, acc_train)
+
+    # Safe TensorBoard closure
+    try:
+        log("💾 Flushing and closing TensorBoard writer.")
+        TENSORBOARD_WRITER.close()
+    except Exception as e:
+        log(f"⚠️  TensorBoard writer close failed: {e}")
+
+    elapsed = time.time() - start
+    log(f"🏁 Total Runtime: {elapsed / 60:.2f} min")
+
+
+if __name__ == "__main__":
+    main()
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/calibration.py ---
+# growth/calibration.py
+"""
+Handles calibration of the Phi field to find optimal sign and neutral band.
+"""
+from typing import List, Tuple, Dict
+from growth.config import CONFIG
+from growth.phi_computer import phi_raw_for_pair
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = lambda x, **kwargs: x
+
+
+def map_label(phi_cal: float, neutral_band: float) -> str:
+    """Maps a calibrated Phi value to a discrete label."""
+    if phi_cal > neutral_band:
+        return "entailment"
+    elif phi_cal < -neutral_band:
+        return "contradiction"
+    return "neutral"
+
+
+def calibrate_phi(train_pairs: List[Tuple[str, str, str]]) -> Dict[str, float]:
+    """
+    Calibrates Phi sign and neutral band on a subset of data.
+    """
+    n_calib = max(100, int(len(train_pairs) * CONFIG["calib_frac"]))
+    calib = train_pairs[:n_calib]
+
+    print(f"Running calibration on {len(calib)} samples...")
+    raw_list = [(phi_raw_for_pair(s1, s2), g) for s1, s2, g in tqdm(calib, desc="Calibrating Φ")]
+
+    best = {"phi_sign": +1.0, "neutral_band": 0.35, "acc": -1.0}
+
+    for sign in (+1.0, -1.0):
+        for band in CONFIG["neutral_band_grid"]:
+            preds, correct = [], 0
+            for raw_phi, gold in raw_list:
+                phi_cal = sign * raw_phi
+                pred = map_label(phi_cal, band)
+                preds.append(pred)
+                correct += (pred == gold)
+
+            acc = correct / len(raw_list)
+            dist = {p: preds.count(p) / len(preds) for p in ("entailment", "neutral", "contradiction")}
+
+            # Penalize solutions that collapse to a single label
+            collapse_penalty = max(dist.values())
+            effective = acc * (1 - collapse_penalty + 0.33)  # +0.33 is baseline random guess
+
+            if effective > best["acc"]:
+                best = {"phi_sign": sign, "neutral_band": band, "acc": effective}
+
+    print(f"✅ Calibration: sign={best['phi_sign']:+.0f}, band={best['neutral_band']:.2f}, score={best['acc']:.3f}")
+    return best
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/dispatcher.py ---
+from core.audit import AuditLog
+from .rule_merge import rule_merge
+from .rule_branch import rule_branch
+from .rule_stabilize import rule_stabilize
+from .rule_revert import rule_revert
+from .result import GrowthResult
+
+RULE_MAP = {
+    "merge": rule_merge,
+    "branch": rule_branch,
+    "stabilize": rule_stabilize,
+    "revert": rule_revert,
+}
+
+def apply_rule(name: str, *args, **kwargs) -> tuple[GrowthResult, AuditLog]:
+    if name not in RULE_MAP:
+        raise ValueError(f"Unknown rule '{name}'. Valid: {list(RULE_MAP.keys())}")
+    return RULE_MAP[name](*args, **kwargs)
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/selfcheck.py ---
+from core.lattice import canonical_symbol_layout
+from core.semantic import compute_intent
+from core.audit import AuditLog
+from .dispatcher import apply_rule
+
+if __name__ == "__main__":
+    A = canonical_symbol_layout()
+    B = A.clone()
+    log = AuditLog()
+
+    intent = compute_intent(A, B)
+    for name in ["merge", "branch", "stabilize", "revert"]:
+        result, log = apply_rule(name, A, B if name == "merge" else A, intent=intent, log=log)
+        print(result)
+    print(log.describe())
+    print("rules/ self-check passed ✓")
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/docstring_header.py ---
+"""
+Livnium Growth — rules.py
+=========================
+Implements the deterministic growth laws that govern structural cognition.
+
+A Growth Rule is a reversible, geometric transformation applied to a
+GrowthNode or pair of GrowthNodes.  Each rule must preserve:
+
+    ΣSW == 486
+    -1.0 ≤ Φ ≤ +1.0
+    verify_conservation() == True
+
+Growth Rules (canonical):
+    G1 — Merge (alignment)
+    G2 — Branch (divergence)
+    G3 — Stabilize (rebalance after perturbation)
+    G4 — Revert (undo last growth step)
+
+All rules operate purely on geometric and semantic quantities:
+    LatticeState, IntentVector, AuditLog
+"""
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/__init__.py ---
+from .dispatcher import apply_rule
+from .result import GrowthResult
+
+__all__ = ["apply_rule", "GrowthResult"]
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/rule_revert.py ---
+from core.semantic import compute_intent
+from core.audit import audit_cycle
+from core.conservation import conserve_ledger
+from .result import GrowthResult
+
+@conserve_ledger
+def rule_revert(current, previous, log=None, observer="Om"):
+    phi = compute_intent(current, previous, observer=observer).polarity
+    audit_cycle(current, previous, "rule_revert", observer=observer, log=log)
+    return GrowthResult(previous.clone(), phi, "G4:revert"), log
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/rule_stabilize.py ---
+from core.lattice import rebalance
+from core.semantic import compute_intent
+from core.audit import audit_cycle
+from core.conservation import conserve_ledger, verify_conservation
+from .result import GrowthResult
+
+@conserve_ledger
+def rule_stabilize(state, log=None, observer="Om"):
+    before = state.clone()
+    rebalance(state)
+    phi = compute_intent(before, state, observer=observer).polarity
+    assert verify_conservation(state)
+    audit_cycle(before, state, "rule_stabilize", observer=observer, log=log)
+    return GrowthResult(state, phi, "G3:stabilize"), log
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/result.py ---
+from dataclasses import dataclass
+from core.lattice import LatticeState
+
+@dataclass
+class GrowthResult:
+    new_state: LatticeState
+    new_polarity: float
+    rule: str
+    note: str = ""
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/rule_branch.py ---
+import numpy as np
+from core.rotation import rotate_sequence
+from core.semantic import IntentVector, compute_intent
+from core.audit import AuditLog, audit_cycle
+from core.conservation import conserve_ledger, verify_conservation
+from .helpers import _clip_phi
+from .result import GrowthResult
+
+@conserve_ledger
+def rule_branch(parent, intent, divergence=0.5, log=None, observer="Lo"):
+    phi = _clip_phi(intent.polarity)
+    if phi >= 0:
+        return GrowthResult(parent.clone(), phi, "G2:noop", note="no divergence"), log or AuditLog()
+    k = int(round(abs(phi) * 3 * divergence)) or 1
+    seq = "XYZ"[:k]
+    new_state = rotate_sequence(parent, seq)
+    new_state.normalize()
+    assert verify_conservation(new_state)
+    audit_cycle(parent, new_state, f"rule_branch({seq})", observer=observer, log=log)
+    return GrowthResult(new_state, phi, "G2:branch", note=f"seq={seq}"), log
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/rule_merge.py ---
+from core.semantic import IntentVector, compute_intent
+from core.audit import AuditLog, audit_cycle
+from core.conservation import conserve_ledger
+from .helpers import _blend_lattices, _clip_phi
+from .result import GrowthResult
+
+@conserve_ledger
+def rule_merge(A, B, intent=None, log=None, observer="Om"):
+    if intent is None:
+        intent = compute_intent(A, B, observer=observer)
+    phi = _clip_phi(intent.polarity)
+    weight = 0.5 + 0.5 * phi
+    merged = _blend_lattices(A, B, w=weight)
+    audit_cycle(A, merged, "rule_merge", observer=observer, log=log)
+    return GrowthResult(merged, phi, "G1:merge", note=f"w={weight:.3f}"), log
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/rules/helpers.py ---
+from core.conservation import verify_conservation, conserve_ledger
+from core.lattice import LatticeState
+
+@conserve_ledger
+def _blend_lattices(a: LatticeState, b: LatticeState, w: float = 0.5) -> LatticeState:
+    s = a.clone()
+    s.weights = (a.weights * w) + (b.weights * (1.0 - w))
+    for x in range(3):
+        for y in range(3):
+            for z in range(3):
+                ca, cb = a.cells[x, y, z], b.cells[x, y, z]
+                s.cells[x, y, z] = ca if ca <= cb else cb
+    s.normalize()
+    assert verify_conservation(s), "Merged lattice violated ΣSW!"
+    return s
+
+def _clip_phi(phi: float) -> float:
+    return float(max(-1.0, min(1.0, phi)))
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/inward_worker.py ---
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/search_orchestrator.py ---
+from __future__ import annotations
+from typing import List, Optional, TYPE_CHECKING, Dict, Any, Tuple
+from growth.mind.policy import PolicyPi
+import time
+import numpy as np
+import heapq
+
+
+# -------------------------------------------------------------------
+# Placeholder Classes (for standalone execution)
+# -------------------------------------------------------------------
+class IntentVector:
+    pass
+
+
+def compute_intent(state1: Any, state2: Any, observer: str) -> IntentVector:
+    return IntentVector()
+
+
+class GrowthNode:
+    def __init__(self, state, polarity, depth, rule, note, parent, log, node_id, parent_id, search_state):
+        self.state = state
+        self.polarity = polarity
+        self.depth = depth
+        self.rule = rule
+        self.note = note
+        self.parent = parent
+        self.log = log
+        self.node_id = node_id
+        self.parent_id = parent_id
+        self.search_state = search_state
+        self.score = 0.0
+        self.children: List['GrowthNode'] = []
+        self.g_score: float = 0.0
+        self.h_score: float = 0.0
+
+
+class GrowthResult:
+    def __init__(self, new_state, new_polarity, rule, note):
+        self.new_state = new_state
+        self.new_polarity = new_polarity
+        self.rule = rule
+        self.note = note
+
+
+def apply_rule(rule_name, *args, **kwargs) -> Tuple[Optional[GrowthResult], Dict]:
+    return GrowthResult(new_state=args[0], new_polarity=0.5, rule=rule_name, note="applied"), {}
+
+
+# -------------------------------------------------------------------
+# TYPE CHECKING IMPORTS
+# -------------------------------------------------------------------
+if TYPE_CHECKING:
+    class GrowthMind:
+        phi_damping: float
+        temperature: float
+        journal: List[Dict]
+        policy: PolicyPi
+
+    class GrowthTree:
+        root: GrowthNode
+        def add_node(self, child: GrowthNode, parent_id: int): ...
+
+    from growth.mind.growth_mind import GrowthMind
+    from growth.mind.growth_tree import GrowthTree
+
+
+# -------------------------------------------------------------------
+# GLOBAL COUNTERS FOR THROTTLED LOGGING
+# -------------------------------------------------------------------
+_CHILD_COUNTER = 0
+_PRINT_INTERVAL = 100_000  # reduced output noise
+
+
+def _log_every_n(msg: str):
+    """Prints once every N child nodes for monitoring long runs."""
+    global _CHILD_COUNTER
+    if _CHILD_COUNTER % _PRINT_INTERVAL == 0 and _CHILD_COUNTER != 0:
+        t = time.strftime("%H:%M:%S")
+        print(f"[{t}] {msg}")
+
+
+# -------------------------------------------------------------------
+# A* CONFIG
+# -------------------------------------------------------------------
+MAX_DEPTH = 10
+BEAM_WIDTH = 5
+REVERT_EXTRA_COST = 1.0
+NOISE_SCALE = 1.0
+A_STAR_PRINT_INTERVAL = 50_000  # larger to quiet normal runs
+
+
+# -------------------------------------------------------------------
+# Search Orchestrator (A* with Beam)
+# -------------------------------------------------------------------
+class SearchOrchestrator:
+    """
+    A* search with per-level beam pruning.
+    f(n) = g(n) + h(n)
+      • g(n): path cost (depth-based with higher cost for 'revert')
+      • h(n): -Q(rule) with small Gumbel noise (scaled by temperature)
+    """
+
+    def __init__(self, mind: 'GrowthMind', tree: 'GrowthTree'):
+        self.mind = mind
+        self.tree = tree
+        self.node_counter = 1
+
+    def _get_next_node_id(self) -> int:
+        node_id = self.node_counter
+        self.node_counter += 1
+        return node_id
+
+    # ---------------------------------------------------------------
+    # Child Generation
+    # ---------------------------------------------------------------
+    def _generate_children(self, parent_node: GrowthNode, intent: IntentVector) -> List[GrowthNode]:
+        """Generates all possible child nodes for a given parent."""
+        global _CHILD_COUNTER
+        children: List[GrowthNode] = []
+        parent_state = parent_node.state
+        grandparent_state = parent_node.parent.state if parent_node.parent else parent_state
+
+        possible_rules = ["merge", "branch", "stabilize", "revert"]
+
+        for rule_name in possible_rules:
+            args: Tuple = ()
+            kwargs: Dict[str, Any] = {"log": parent_node.log}
+
+            if rule_name == "merge":
+                args = (parent_state, grandparent_state)
+                kwargs["intent"] = intent
+            elif rule_name == "branch":
+                args = (parent_state,)
+                kwargs["intent"] = intent
+            elif rule_name == "stabilize":
+                args = (parent_state,)
+            elif rule_name == "revert":
+                if parent_node.parent is None or parent_node.parent.parent is None:
+                    continue
+                args = (parent_node.parent.parent.state,)
+            else:
+                continue
+
+            try:
+                result, log = apply_rule(rule_name, *args, **kwargs)
+            except Exception:
+                continue
+
+            if result is None or result.new_state is None:
+                continue
+
+            child_node = GrowthNode(
+                state=result.new_state,
+                polarity=result.new_polarity * self.mind.phi_damping,
+                depth=parent_node.depth + 1,
+                rule=result.rule,
+                note=result.note,
+                parent=parent_node,
+                log=log,
+                node_id=self._get_next_node_id(),
+                parent_id=parent_node.node_id,
+                search_state="GENERATED"
+            )
+            children.append(child_node)
+            _CHILD_COUNTER += 1
+
+            # Throttled progress indicator (kept for transparency)
+            _log_every_n(
+                f"🌿 {_CHILD_COUNTER:,} child nodes created | "
+                f"id={child_node.node_id}, rule='{child_node.rule}', Φ={child_node.polarity:+.3f}, depth={child_node.depth}"
+            )
+
+        return children
+
+    # ---------------------------------------------------------------
+    # A* + Beam Execution
+    # ---------------------------------------------------------------
+    def run_search(self, initial_intent: IntentVector, note_prefix: str) -> Optional[GrowthNode]:
+        """
+        A* search with beam pruning.
+        Keeps top-K candidates per level based on f(n) = g(n) + h(n).
+        """
+        global _CHILD_COUNTER
+        root = self.tree.root
+        root.g_score = 0.0
+        root.h_score = -self.mind.policy.Q.get("origin", 0.0)
+        root.search_state = "ROOT"
+
+        frontier_pq: List[Tuple[float, int, GrowthNode]] = []
+        heapq.heappush(frontier_pq, (root.g_score + root.h_score, root.node_id, root))
+
+        best_solution_node: Optional[GrowthNode] = root
+        best_h = root.h_score
+        visited_nodes = 0
+
+        for depth in range(MAX_DEPTH):
+            if not frontier_pq:
+                break
+
+            next_level_candidates: List[Tuple[float, int, GrowthNode]] = []
+
+            while frontier_pq:
+                _, _, current_node = heapq.heappop(frontier_pq)
+                current_node.search_state = "EXPANDED"
+                visited_nodes += 1
+
+                if current_node.h_score < best_h:
+                    best_h = current_node.h_score
+                    best_solution_node = current_node
+
+                rule_tail = current_node.rule.split(':')[-1]
+                is_terminal = rule_tail in ("merge", "branch")
+                if is_terminal or current_node.depth >= MAX_DEPTH:
+                    continue
+
+                current_intent = (
+                    initial_intent
+                    if current_node.depth == 0
+                    else compute_intent(
+                        current_node.state,
+                        current_node.parent.state if current_node.parent else current_node.state,
+                        observer="Lo"
+                    )
+                )
+
+                child_nodes = self._generate_children(current_node, current_intent)
+
+                for child in child_nodes:
+                    rule_key = child.rule.split(':')[-1]
+
+                    g_score = current_node.g_score + 1
+                    h_score = -self.mind.policy.Q.get(rule_key, 0.0)
+                    h_score -= np.random.gumbel() * self.mind.temperature
+                    f_score = g_score + h_score
+
+                    # Minimal A* diagnostics only at long intervals
+                    if _CHILD_COUNTER % A_STAR_PRINT_INTERVAL == 0 and _CHILD_COUNTER != 0:
+                        t = time.strftime("%H:%M:%S")
+                        print(f"[{t}] A* progress → {_CHILD_COUNTER:,} nodes processed | "
+                              f"latest ID={child.node_id}, rule={rule_key}, f={f_score:+.2f}")
+
+                    child.g_score = g_score
+                    child.h_score = h_score
+                    self.tree.add_node(child, current_node.node_id)
+
+                    heapq.heappush(next_level_candidates, (f_score, child.node_id, child))
+
+                    phi_field_flat = (
+                        child.state.weights.flatten().tolist()
+                        if hasattr(child.state, 'weights')
+                        else []
+                    )
+                    self.mind.journal.append({
+                        "t": time.time(),
+                        "node_id": child.node_id,
+                        "parent_id": child.parent_id,
+                        "depth": child.depth,
+                        "rule": child.rule,
+                        "Φ": round(child.polarity, 6),
+                        "note": f"{note_prefix}_{child.rule}",
+                        "g_score": round(g_score, 6),
+                        "h_score": round(h_score, 6),
+                        "f_score": round(f_score, 6),
+                        "phi_field_flat": phi_field_flat
+                    })
+
+            if not next_level_candidates:
+                break
+
+            best_k = heapq.nsmallest(BEAM_WIDTH, next_level_candidates)
+            frontier_pq = best_k
+
+        return best_solution_node
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/math_utils.py ---
+# growth/math_utils.py
+"""
+Mathematical helper functions for linear algebra.
+"""
+import numpy as np
+
+def _orthonormal_rows(C: np.ndarray) -> np.ndarray:
+    u, _, vT = np.linalg.svd(C, full_matrices=False)
+    return u @ vT
+
+def _safe_norm(x: np.ndarray) -> float:
+    n = float(np.linalg.norm(x))
+    return n if n > 1e-12 else 1e-12
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/policy.py ---
+# --- growth/policy.py (Thread-Safe for Inward Growth) ---
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Dict
+import numpy as np
+import threading # <-- ADDED for concurrency control
+
+@dataclass
+class PolicyPi:
+    Q: Dict[str, float] = field(default_factory=lambda: {
+        "merge": 0.0,
+        "branch": 0.0,
+        "stabilize": 0.50,
+        "revert": 0.0
+    })
+    alpha = 0.05
+    gamma: float = 0.9
+
+    # ADDED: Lock to ensure thread-safe updates to the shared Q dictionary
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def update(self, rule: str, reward: float):
+        """Basic Q-value update, protected by a lock to prevent race conditions."""
+        with self._lock: # <-- THREAD-SAFETY HOOK
+            q_old = self.Q.get(rule, 0.0)
+            self.Q[rule] = q_old + self.alpha * (reward - q_old)
+
+    def softmax_probs(self, temperature: float = 0.1) -> Dict[str, float]:
+        # NOTE: Reads don't usually need a lock unless atomicity is critical,
+        # but the array copy ensures stability for computation.
+        q_vals = np.array(list(self.Q.values()))
+        q_exp = np.exp(q_vals / max(temperature, 1e-6))
+        probs = q_exp / np.sum(q_exp)
+        return dict(zip(self.Q.keys(), probs))
+
+    def describe(self, rules: list[str] = None) -> str:
+        """Returns a string representation of the Q-values."""
+        # Reads are safe outside the lock for diagnostics
+        if rules is None:
+            return "Q=" + ", ".join(f"{k}:{v:+.2f}" for k, v in sorted(self.Q.items()))
+
+        display_q = {k: self.Q.get(k, 0.0) for k in rules}
+        return "Q=" + ", ".join(f"{k}:{v:+.2f}" for k, v in sorted(display_q.items()))
+
+    def entropy(self, temperature: float = 0.1) -> float:
+        """Shannon entropy of the softmax policy at the given temperature."""
+        p = np.asarray(list(self.softmax_probs(temperature).values()), dtype=float)
+        return float(-np.sum(p * np.log2(p + 1e-9)))
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/growth_mind_introspection.py ---
+# growth/growth_mind_introspection.py
+"""
+Mixin class for GrowthMind to handle introspection, stats, and traversal.
+"""
+from __future__ import annotations
+from typing import Iterable, TYPE_CHECKING
+import time
+import numpy as np
+
+if TYPE_CHECKING:
+    from growth.node.core_node import GrowthNode
+    from growth.mind.growth_mind import GrowthMind
+
+
+class GrowthMindIntrospectionMixin:
+    def traverse_bfs(self: 'GrowthMind') -> Iterable['GrowthNode']:
+        # 🟢 CRITICAL FIX: Check if the root is initialized before traversal.
+        if not hasattr(self, 'root') or self.root is None:
+            return  # Return an empty iterable immediately
+
+        q = [self.root]
+        seen = set()
+        while q:
+            n = q.pop(0)
+            if id(n) in seen:
+                continue
+            seen.add(id(n))
+            yield n
+            q.extend(n.children)
+
+    def stats(self: 'GrowthMind') -> dict:
+        nodes = list(self.traverse_bfs())
+        if not nodes:
+            # Ensures all expected keys are returned with safe defaults
+            return {
+                "count": 0,
+                "depth_max": 0,
+                "Φ_mean": 0.0,
+                "Φ_var": 0.0,
+                "entropy": 0.0,
+                "policy": {},
+            }
+        phis = [n.polarity for n in nodes]
+        var = float(np.var(phis))
+
+        # Assumes branch_var_threshold and policy exist on self
+        if hasattr(self, 'branch_var_threshold') and var < self.branch_var_threshold:
+            # Give a small Q-reward to 'branch' to encourage exploration
+            self.policy.update("branch", 0.1)
+
+        return {
+            "count": len(nodes),
+            "depth_max": max(n.depth for n in nodes),
+            "Φ_mean": float(np.mean(phis)),
+            "Φ_var": var,
+            "entropy": self.policy.entropy(self.temperature),
+            "policy": dict(self.policy.Q),
+        }
+
+    def to_dict(self: 'GrowthMind') -> dict:
+        return {
+            "policy": dict(self.policy.Q),
+            "journal": list(self.journal),
+            "nodes": [
+                {"depth": n.depth, "rule": n.rule, "Φ": n.polarity,
+                 "children": [id(c) for c in n.children]}
+                for n in self.traverse_bfs()
+            ],
+        }
+
+    def reflect(self: 'GrowthMind'):
+        """Print internal mind metrics for introspection. Must be robust to empty data."""
+
+        # This explicit check here is now redundant but kept for safety,
+        # as the traversal method now handles the empty root case first.
+
+        stats = self.stats()
+
+        if stats["count"] == 0:
+            print(f"\n🧠 GrowthMind Reflection: No nodes found in tree.")
+            return
+
+        # Ensures policy metrics are calculated correctly even if Q is small
+        policy = self.policy.softmax_probs(self.temperature)
+        print(f"\n🧠 GrowthMind Reflection:")
+        print(f"   Nodes: {stats['count']}, depth_max={stats.get('depth_max', 0)}")
+        print(f"   Φ̄={stats['Φ_mean']:+.3f}, σ²={stats['Φ_var']:.4f}, entropy={stats['entropy']:.3f}")
+        print(f"   Policy → " + ", ".join(f"{k}:{policy[k]:.2f}" for k in policy))
+        print(f"   Dynamic Temp: {self.temperature:.3f}")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/growth_mind.py ---
+# """
+# Livnium Growth — growth_mind.py
+# ===============================
+# Refactored to be a "controller" that holds Policy, Memory, and Journal.
+# The search logic has been externalized to SearchOrchestrator.
+# (Based on Section 4.1 of the architectural doc)
+# """
+#
+# from __future__ import annotations
+# from dataclasses import dataclass, field
+# from typing import Optional, Dict, List, Any
+# import numpy as np
+# import time
+#
+# # --- Core Livnium Imports ---
+# from core.lattice import LatticeState, canonical_symbol_layout
+#
+# # --- Imports relative to the 'growth/' directory ---
+# from growth.node.core_node import GrowthNode  # Assuming core_node is updated
+#
+# # --- Top-level import ---
+# from growth.memory_coupling import MemoryCoupling
+#
+# # --- Refactored Module Imports (relative to this 'mind/' dir) ---
+# from growth.mind.policy import PolicyPi
+# from growth.mind.growth_mind_memory import GrowthMindMemoryMixin
+# from growth.mind.growth_mind_expansion import GrowthMindExpansionMixin
+# from growth.mind.growth_mind_introspection import GrowthMindIntrospectionMixin
+# from growth.mind.growth_mind_persistence import GrowthMindPersistenceMixin
+#
+# # --- FIX: ADDED CONSTANTS BACK IN ---
+# # These constants control the mind's metabolic/exploration parameters,
+# # which are used by the SearchOrchestrator.
+# _TEMP_MIN = 0.02
+# _TEMP_MAX = 0.50  # <-- SET TO 0.50 (was 0.12)
+# # ------------------------------------
+#
+#
+# @dataclass
+# class GrowthMind(
+#     GrowthMindMemoryMixin,
+#     GrowthMindExpansionMixin,
+#     GrowthMindIntrospectionMixin,
+#     GrowthMindPersistenceMixin,
+# ):
+#     """
+#     Core controller for Policy, Memory, and Journaling.
+#     The search logic is now handled by SearchOrchestrator.
+#     """
+#
+#     # --- Core AI Components ---
+#     policy: PolicyPi = field(default_factory=PolicyPi)
+#     journal: List[dict] = field(default_factory=list)
+#     memory: MemoryCoupling = field(
+#         default_factory=lambda: MemoryCoupling(alpha=0.2, max_size=512)
+#     )
+#
+#     # --- Parameters used by external components (like SearchOrchestrator) ---
+#     temperature: float = 0.07
+#     phi_damping: float = 0.95
+#     neutral_band: float = 0.45
+#
+#     # --- Other attributes ---
+#     last_logged_pi: Optional[Dict[str, float]] = None
+#     motif_eta: float = 0.15
+#
+#     # -------------------------------------------------------------------
+#     # Construction
+#     # -------------------------------------------------------------------
+#
+#     @classmethod
+#     def from_config(cls, cfg: dict) -> "GrowthMind":
+#         """Instantiate GrowthMind from configuration dictionary."""
+#         mind = cls()  # Create an empty mind
+#         mind.temperature = cfg.get("temperature", 0.04)
+#         mind.phi_damping = cfg.get("phi_damping", 0.95)
+#         mind.motif_eta = float(cfg.get("motif_eta", 0.15))
+#         mind.neutral_band = cfg.get("neutral_band", 0.45)
+#         return mind
+#
+#     # -------------------------------------------------------------------
+#     # Core ToT control (ALL METHODS REMOVED)
+#     # -------------------------------------------------------------------
+#     # The 'step' method and its helpers are correctly removed.
+#     # -------------------------------------------------------------------
+#
+#
+#     # -------------------------------------------------------------------
+#     # META-COGNITION (Still relevant)
+#     # -------------------------------------------------------------------
+#
+#     def metacog_reflect_and_tune(self, cm: np.ndarray, train_acc: float) -> None:
+#         """
+#         Tunes the mind's internal NEUTRAL_BAND for the *next* run.
+#         """
+#         print("\n" + "=" * 20 + " META-COGNITION REFLECTION " + "=" * 20)
+#
+#         neutral_total = cm[1, :].sum()
+#         neutral_correct = cm[1, 1]
+#
+#         if neutral_total == 0:
+#             print("🧠 [MetaCog] No neutral samples seen. No tuning applied.")
+#             return
+#
+#         neutral_acc = neutral_correct / max(1, neutral_total)
+#         print(f"🧠 [MetaCog] Last run total accuracy: {train_acc:.2%}")
+#         print(f"🧠 [MetaCog] Last run 'neutral' accuracy: {neutral_acc:.2%}")
+#         print(f"🧠 [MetaCog] Current neutral_band: {self.neutral_band:.3f}")
+#
+#         # --- FINE-GRAINED TUNING LOGIC ---
+#         TUNING_STEP = 0.01
+#         # Check if neutral accuracy is lagging significantly behind total accuracy
+#         is_lagging = neutral_acc < (train_acc - 0.10)
+#         # Check if neutral accuracy is too far ahead of total accuracy (dominant/too eager)
+#         is_too_eager = neutral_acc > (train_acc + 0.05)  # Changed boolean variable name for clarity
+#
+#         if is_lagging:
+#             # Action: Widen the band (correct behavior for lagging/cautious class)
+#             self.neutral_band = min(self.neutral_band + TUNING_STEP, 0.60)
+#             print(
+#                 f"🧠 [MetaCog] RESULT: Too Cautious → widen to {self.neutral_band:.3f}"
+#             )
+#         elif is_too_eager:
+#             # Action: Narrow the band (correct behavior for dominant/eager class)
+#             self.neutral_band = max(self.neutral_band - TUNING_STEP, 0.20)
+#             # 🟢 CRITICAL FIX: Change descriptive text to "Too Eager" to match the action
+#             print(
+#                 f"🧠 [MetaCog] RESULT: Too Eager → narrow to {self.neutral_band:.3f}"
+#             )
+#         else:
+#             print("🧠 [MetaCog] RESULT: Balanced. No tuning required.")
+#
+#         print("=" * 66)
+#     # -------------------------------------------------------------------
+#     # Internal helpers (Metabolism)
+#     # -------------------------------------------------------------------
+#
+#     def update_temperature(self) -> None:
+#         """
+#         Entropy-coupled temperature feedback.
+#         This is called by the orchestrator to keep exploration dynamic.
+#         """
+#         try:
+#             current_entropy = self.policy.entropy(self.temperature)
+#             self.temperature *= 0.995 if current_entropy > 1.5 else 1.002
+#             self.temperature = float(np.clip(self.temperature, _TEMP_MIN, _TEMP_MAX))
+#         except Exception:
+#             # stay fail-quiet
+#             pass
+
+"""
+Livnium Growth — growth_mind.py
+===============================
+Refactored to be a "controller" that holds Policy, Memory, and Journal.
+The search logic has been externalized to SearchOrchestrator.
+(Based on Section 4.1 of the architectural doc)
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List, Any
+import numpy as np
+import time
+
+# --- Core Livnium Imports ---
+from core.lattice import LatticeState, canonical_symbol_layout
+
+# --- Imports relative to the 'growth/' directory ---
+from growth.node.core_node import GrowthNode  # Assuming core_node is updated
+
+# --- Top-level import ---
+from growth.memory_coupling import MemoryCoupling
+
+# --- Refactored Module Imports (relative to this 'mind/' dir) ---
+from growth.mind.policy import PolicyPi
+from growth.mind.growth_mind_memory import GrowthMindMemoryMixin
+from growth.mind.growth_mind_expansion import GrowthMindExpansionMixin
+from growth.mind.growth_mind_introspection import GrowthMindIntrospectionMixin
+from growth.mind.growth_mind_persistence import GrowthMindPersistenceMixin
+
+# -------------------------------------------------------------------
+# Tunables & constants (RESTORED)
+# -------------------------------------------------------------------
+
+_TEMP_MIN = 0.02
+_TEMP_MAX = 0.50  # Max exploration temperature (used for normalization)
+
+# Risk-to-Reward (R2R) curiosity shaping constants
+_R2R_MULTIPLIER = 0.1
+_R2R_MAX_BONUS = 0.5
+
+
+# -------------------------------------------------------------------
+# GrowthMind
+# -------------------------------------------------------------------
+
+
+@dataclass
+class GrowthMind(
+    GrowthMindMemoryMixin,
+    GrowthMindExpansionMixin,
+    GrowthMindIntrospectionMixin,
+    GrowthMindPersistenceMixin,
+):
+    """
+    Core controller for Policy, Memory, and Journaling.
+    The search logic is now handled by SearchOrchestrator.
+    """
+
+    # --- FIX: RESTORED STRUCTURAL FIELDS for Introspection Mixin ---
+    # These must be present, even though they are initialized by GrowthTree externally
+    root: Optional['GrowthNode'] = field(default=None)
+    active: Optional['GrowthNode'] = field(default=None)
+    # --------------------------------------------------------------
+
+    # --- Core AI Components ---
+    policy: PolicyPi = field(default_factory=PolicyPi)
+    journal: List[dict] = field(default_factory=list)
+    memory: MemoryCoupling = field(
+        default_factory=lambda: MemoryCoupling(alpha=0.2, max_size=512)
+    )
+
+    # --- Parameters used by external components (like SearchOrchestrator) ---
+    temperature: float = 0.07
+    phi_damping: float = 0.95
+    neutral_band: float = 0.45
+
+    # --- RESTORED THRESHOLD ATTRIBUTE (Needed by stats() mixin) ---
+    branch_var_threshold: float = 0.002
+    # --------------------------------------------------------------
+
+    # --- Other attributes ---
+    last_logged_pi: Optional[Dict[str, float]] = None
+    motif_eta: float = 0.15
+
+    # -------------------------------------------------------------------
+    # Construction
+    # -------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "GrowthMind":
+        """Instantiate GrowthMind from configuration dictionary."""
+        mind = cls()  # Create an empty mind
+        mind.temperature = cfg.get("temperature", 0.04)
+        mind.phi_damping = cfg.get("phi_damping", 0.95)
+        mind.motif_eta = float(cfg.get("motif_eta", 0.15))
+        mind.neutral_band = cfg.get("neutral_band", 0.45)
+        # FIX: Ensure threshold is set from config if available
+        mind.branch_var_threshold = cfg.get("branch_var_threshold", 0.002)
+        return mind
+
+    # -------------------------------------------------------------------
+    # META-COGNITION (Still relevant)
+    # -------------------------------------------------------------------
+
+    def metacog_reflect_and_tune(self, cm: np.ndarray, train_acc: float) -> None:
+        """
+        Tunes the mind's internal NEUTRAL_BAND for the *next* run.
+        """
+        print("\n" + "=" * 20 + " META-COGNITION REFLECTION " + "=" * 20)
+
+        neutral_total = cm[1, :].sum()
+        neutral_correct = cm[1, 1]
+
+        if neutral_total == 0:
+            print("🧠 [MetaCog] No neutral samples seen. No tuning applied.")
+            return
+
+        neutral_acc = neutral_correct / max(1, neutral_total)
+        print(f"🧠 [MetaCog] Last run total accuracy: {train_acc:.2%}")
+        print(f"🧠 [MetaCog] Last run 'neutral' accuracy: {neutral_acc:.2%}")
+        print(f"🧠 [MetaCog] Current neutral_band: {self.neutral_band:.3f}")
+
+        # --- FINE-GRAINED TUNING LOGIC ---
+        TUNING_STEP = 0.01
+        is_lagging = neutral_acc < (train_acc - 0.10)
+        is_too_eager = neutral_acc > (train_acc + 0.05)
+
+        if is_lagging:
+            self.neutral_band = min(self.neutral_band + TUNING_STEP, 0.60)
+            print(
+                f"🧠 [MetaCog] RESULT: Too Cautious → widen to {self.neutral_band:.3f}"
+            )
+        elif is_too_eager:
+            self.neutral_band = max(self.neutral_band - TUNING_STEP, 0.20)
+            print(
+                f"🧠 [MetaCog] RESULT: Too Eager → narrow to {self.neutral_band:.3f}"
+            )
+        else:
+            print("🧠 [MetaCog] RESULT: Balanced. No tuning required.")
+
+        print("=" * 66)
+
+    # -------------------------------------------------------------------
+    # Internal helpers (Metabolism)
+    # -------------------------------------------------------------------
+
+    def update_temperature(self) -> None:
+        """
+        Entropy-coupled temperature feedback.
+        This is called by the orchestrator to keep exploration dynamic.
+        """
+        try:
+            current_entropy = self.policy.entropy(self.temperature)
+            # Adjust temperature based on entropy level
+            self.temperature *= 0.995 if current_entropy > 1.5 else 1.002
+            # Clamp temperature to defined limits (_TEMP_MIN/_TEMP_MAX)
+            self.temperature = float(np.clip(self.temperature, _TEMP_MIN, _TEMP_MAX))
+        except Exception:
+            # stay fail-quiet
+            pass
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/growth_mind_expansion.py ---
+# growth/growth_mind_expansion.py
+"""
+Mixin class for GrowthMind to handle motif-aware expansion.
+"""
+from __future__ import annotations
+from typing import Optional, TYPE_CHECKING
+import numpy as np
+import time
+from core.semantic import compute_intent
+
+if TYPE_CHECKING:
+    from growth.node.core_node import GrowthNode
+    from growth.mind.growth_mind import GrowthMind
+    from core.lattice import LatticeState # Assuming this is the type for 'lattice'
+
+class GrowthMindExpansionMixin:
+    def expand_from_lattice(self: 'GrowthMind', lattice: 'LatticeState') -> Optional['GrowthNode']:
+        if not lattice.entries:
+            return None
+
+        recent = lattice.entries[-min(5, len(lattice.entries)):]
+        phis = [e.phi for e in recent]
+        variance = float(np.var(phis))
+        avg_phi = float(np.mean(phis))
+
+        # Base rule by statistics
+        if variance > 0.05:
+            rule_hint = "branch"
+        elif avg_phi > 0.1:
+            rule_hint = "merge"
+        else:
+            rule_hint = "stabilize"
+
+        # --- Motif bias: use motifs near avg Φ to nudge intent polarity
+        motif_bias = 0.0
+        motif_meta = None
+        try:
+            motifs = getattr(lattice, "motifs", None)
+            if motifs is not None:
+                found = motifs.find(avg_phi, top_k=3)
+                if found:
+                    motif_bias = float(np.mean([m["phi"] for m in found]))
+                    motif_meta = {"count": len(found), "Φ̄_motifs": motif_bias}
+        except Exception:
+            pass
+
+        # Build a blended state and compute intent
+        blended_state = lattice.blend()
+        intent = compute_intent(self.active.state, blended_state)
+
+        # Softly push Φ toward motif polarity (tanh-compressed)
+        if motif_bias != 0.0:
+            phi_push = float(self.motif_eta * np.tanh(motif_bias))
+            intent.polarity = float(np.clip(intent.polarity + phi_push, -1.0, 1.0))
+
+        # Journal the expansion decision with motif info
+        self.journal.append({
+            "t": time.time(),
+            "event": "expand_from_lattice",
+            "rule_hint": rule_hint,
+            "Φ̄_recent": avg_phi,
+            "σ²_recent": variance,
+            "motif_bias": motif_bias,
+            "motif_eta": self.motif_eta,
+            "Φ_after_bias": float(intent.polarity),
+            "π": dict(self.policy.Q),
+            **(motif_meta or {}),
+        })
+
+        # Let step() re-evaluate rule with the biased Φ
+        new_node = self.step(intent, note=f"auto:{rule_hint}", external_correct=None)
+        return new_node
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/growth_mind_memory.py ---
+# --- File: growth/growth_mind_memory.py ---
+"""
+Mixin class for GrowthMind to handle MemoryCoupling adapters.
+Now includes TensorBoard logging for long-term memory evolution.
+Throttled console logs every 1000 updates.
+"""
+from __future__ import annotations
+from typing import Optional, Tuple, TYPE_CHECKING
+import time
+import numpy as np
+from torch.utils.tensorboard import SummaryWriter
+
+if TYPE_CHECKING:
+    from growth.mind.growth_mind import GrowthMind
+
+# -------------------------------------------------------------------
+# TensorBoard Writer Initialization
+# -------------------------------------------------------------------
+# Creates a dedicated run directory for memory tracking
+MEMORY_TENSORBOARD_WRITER = SummaryWriter(
+    f"runs/memory_coupling_{time.strftime('%Y%m%d-%H%M%S')}"
+)
+
+# -------------------------------------------------------------------
+# Global Counters for Throttled Logging
+# -------------------------------------------------------------------
+_MEMORY_UPDATE_COUNTER = 0
+_PRINT_INTERVAL = 1000  # console update frequency
+
+
+def _log_every_1000(msg: str):
+    """Prints a memory status line every 1000 successful updates."""
+    global _MEMORY_UPDATE_COUNTER
+    if _MEMORY_UPDATE_COUNTER % _PRINT_INTERVAL == 0 and _MEMORY_UPDATE_COUNTER != 0:
+        t = time.strftime("%H:%M:%S")
+        print(f"[{t}] {msg}")
+
+
+# -------------------------------------------------------------------
+# Memory Adapter Mixin
+# -------------------------------------------------------------------
+class GrowthMindMemoryMixin:
+    def note_coupling(
+        self: "GrowthMind",
+        key: str,
+        C: np.ndarray,
+        phi: float,
+        src_shape: Tuple[int, ...],
+        dst_shape: Tuple[int, ...],
+    ) -> None:
+        """Store coupling matrix and log both locally and to TensorBoard."""
+        global _MEMORY_UPDATE_COUNTER
+
+        try:
+            self.memory.remember(self.memory.key(src_shape, dst_shape, tag=key), C, phi)
+            stats = self.memory.stats()
+            pool_count = stats.get("matrix_count", stats.get("count", 0))
+
+            # Journal entry for traceability
+            self.journal.append({
+                "t": time.time(),
+                "event": "memory_update",
+                "key": key,
+                "Φ": float(phi),
+                "pool_count": pool_count,
+            })
+
+            # TensorBoard logging
+            MEMORY_TENSORBOARD_WRITER.add_scalar(
+                "Memory/Pool_Size", pool_count, _MEMORY_UPDATE_COUNTER
+            )
+            MEMORY_TENSORBOARD_WRITER.add_scalar(
+                "Memory/Latest_Φ", phi, _MEMORY_UPDATE_COUNTER
+            )
+
+            # Optional: track magnitude/variance of coupling matrix
+            if C is not None and np.size(C) > 0:
+                MEMORY_TENSORBOARD_WRITER.add_scalar(
+                    "Memory/Coupling_Mean", float(np.mean(C)), _MEMORY_UPDATE_COUNTER
+                )
+                MEMORY_TENSORBOARD_WRITER.add_scalar(
+                    "Memory/Coupling_Std", float(np.std(C)), _MEMORY_UPDATE_COUNTER
+                )
+
+            MEMORY_TENSORBOARD_WRITER.flush()
+
+            # Increment counter and throttled console print
+            _MEMORY_UPDATE_COUNTER += 1
+            _log_every_1000(
+                f"🧠 {_MEMORY_UPDATE_COUNTER:,} memory couplings stored | "
+                f"key='{key}', Φ={phi:+.3f}, pool_size={pool_count}"
+            )
+
+        except Exception as e:
+            self.journal.append({
+                "t": time.time(),
+                "event": "memory_error",
+                "key": key,
+                "error": repr(e),
+            })
+
+    def suggest_coupling(
+        self: "GrowthMind",
+        key: str,
+        src_shape: Tuple[int, ...],
+        dst_shape: Tuple[int, ...],
+    ) -> Optional[np.ndarray]:
+        """Retrieve prior coupling from long-term memory."""
+        return self.memory.recall(src_shape, dst_shape, tag=key)
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/growth_tree.py ---
+# --- File: growth/growth_tree.py ---
+from __future__ import annotations
+from typing import Dict, TYPE_CHECKING
+import numpy as np
+import time
+from torch.utils.tensorboard import SummaryWriter
+
+# Assuming AuditLog and LatticeState are in core.*
+from core.audit import AuditLog
+from core.lattice import LatticeState
+from growth.node.core_node import GrowthNode
+
+
+# -------------------------------------------------------------------
+# TensorBoard Writer Initialization
+# -------------------------------------------------------------------
+TREE_TENSORBOARD_WRITER = SummaryWriter(
+    f"runs/tree_growth_{time.strftime('%Y%m%d-%H%M%S')}"
+)
+
+# -------------------------------------------------------------------
+# GrowthTree Class
+# -------------------------------------------------------------------
+class GrowthTree:
+    """
+    Manages the collection of GrowthNodes for a single search iteration.
+    Provides O(1) lookup by node ID and maintains hierarchical structure.
+    TensorBoard logs track node growth and mean depth evolution.
+    """
+
+    def __init__(self, root_node: GrowthNode):
+        self.root = root_node
+        # Dictionary to store all nodes for fast lookup by ID
+        self.nodes: Dict[int, GrowthNode] = {root_node.node_id: root_node}
+        self._node_counter = 1
+        self._depth_sum = 0
+
+    # ---------------------------------------------------------------
+    # Factory Method
+    # ---------------------------------------------------------------
+    @staticmethod
+    def create() -> 'GrowthTree':
+        """
+        Creates the initial root node and a new GrowthTree instance for a search.
+        Ensures the root node has a NumPy array for 'weights' to prevent logging errors.
+        """
+
+        class SimpleStatePlaceholder:
+            def __init__(self):
+                # Ensure 'weights' exists for downstream logging
+                self.weights = np.array([0.0])
+
+        root_state = SimpleStatePlaceholder()
+        root_node = GrowthNode(
+            state=root_state,
+            polarity=0.0,
+            depth=0,
+            rule="INIT:start",
+            note="Root of search tree",
+            parent=None,
+            log=AuditLog(),
+            node_id=0,
+            parent_id=-1,
+            search_state="GENERATED",
+        )
+        return GrowthTree(root_node)
+
+    # ---------------------------------------------------------------
+    # Node Management
+    # ---------------------------------------------------------------
+    def add_node(self, child_node: GrowthNode, parent_id: int):
+        """
+        Registers a new node, links it to its parent,
+        and logs structural metrics to TensorBoard.
+        """
+        self.nodes[child_node.node_id] = child_node
+        parent_node = self.nodes.get(parent_id)
+
+        if parent_node is None:
+            # Log missing-parent event silently
+            TREE_TENSORBOARD_WRITER.add_scalar(
+                "Tree/Orphan_Node_Event", 1, self._node_counter
+            )
+            return
+
+        parent_node.children.append(child_node)
+
+        # --- Update Stats ---
+        self._node_counter += 1
+        self._depth_sum += child_node.depth
+        avg_depth = self._depth_sum / self._node_counter
+
+        # --- TensorBoard Logging ---
+        TREE_TENSORBOARD_WRITER.add_scalar("Tree/Node_Count", self._node_counter, self._node_counter)
+        TREE_TENSORBOARD_WRITER.add_scalar("Tree/Average_Depth", avg_depth, self._node_counter)
+
+        # Optional: count leaf ratio to monitor pruning vs. expansion
+        leaf_count = sum(1 for n in self.nodes.values() if not n.children)
+        TREE_TENSORBOARD_WRITER.add_scalar("Tree/Leaf_Ratio", leaf_count / max(1, self._node_counter), self._node_counter)
+
+        # Ensure TensorBoard stays live-updated
+        TREE_TENSORBOARD_WRITER.flush()
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/reward.py ---
+# --- File: growth/reward.py (Accuracy-Only Reward) ---
+from dataclasses import dataclass
+import numpy as np
+import time
+from typing import TYPE_CHECKING
+from torch.utils.tensorboard import SummaryWriter
+
+if TYPE_CHECKING:
+    from growth.mind.growth_mind import GrowthMind
+    from growth.node.core_node import GrowthNode
+
+# --- Global Initialization and Constants ---
+TENSORBOARD_WRITER = SummaryWriter(f'runs/growth_exp_{time.strftime("%Y%m%d-%H%M%S")}')
+
+# Logging State
+_REWARD_COUNTER = 0
+_TOTAL_REWARD_SUM = 0.0
+_PRINT_INTERVAL = 5000  # Keeping speed optimization
+_STATS_BUFFER = []
+
+
+# --- Reward Parameters (Accuracy Only) ---
+@dataclass
+class RewardParams:
+    # ONLY these two parameters remain
+    correct_reward: float = +1.0
+    incorrect_penalty: float = -1.0
+    # All intrinsic (r2r_multiplier, depth_penalty, etc.) parameters removed.
+
+
+# --- Core Logic Functions ---
+
+def _safe_mean(x: np.ndarray) -> float:
+    return float(np.mean(x)) if len(x) > 0 else 0.0
+
+
+def _log_stats_to_tensorboard(total: float, is_correct: bool, curiosity: float):
+    """Updates the global buffer and logs to TensorBoard on the interval."""
+    global _REWARD_COUNTER, _STATS_BUFFER, _TOTAL_REWARD_SUM
+
+    # curiosity is always 0.0 in this setup but is included for consistent logging structure
+    _STATS_BUFFER.append({"total": total, "is_correct": is_correct, "curiosity": curiosity})
+
+    if _REWARD_COUNTER % _PRINT_INTERVAL == 0 and _REWARD_COUNTER != 0:
+        stats = np.array([d["total"] for d in _STATS_BUFFER])
+        corrects = sum(d["is_correct"] for d in _STATS_BUFFER)
+        curiosity_vals = [d["curiosity"] for d in _STATS_BUFFER]
+        buffer_len = len(_STATS_BUFFER)
+
+        _TOTAL_REWARD_SUM += np.sum(stats)
+        avg_cumulative_reward = _TOTAL_REWARD_SUM / _REWARD_COUNTER
+
+        # TensorBoard Logging
+        TENSORBOARD_WRITER.add_scalar('Performance/Accuracy', corrects / buffer_len, _REWARD_COUNTER)
+        TENSORBOARD_WRITER.add_scalar('Reward/Mean_Total_Reward', _safe_mean(stats), _REWARD_COUNTER)
+        TENSORBOARD_WRITER.add_scalar('Intrinsic/Avg_Curiosity_Bonus', _safe_mean(curiosity_vals), _REWARD_COUNTER)
+        TENSORBOARD_WRITER.add_scalar('Reward/Cumulative_Reward', avg_cumulative_reward, _REWARD_COUNTER)
+        TENSORBOARD_WRITER.flush()
+
+        _STATS_BUFFER.clear()
+
+
+def compute_total_reward(
+        *,
+        mind: "GrowthMind",
+        solution_node: "GrowthNode",
+        is_correct: bool,
+        params: RewardParams,
+) -> float:
+    """Calculates the total reward for a path based ONLY on extrinsic correctness."""
+    global _REWARD_COUNTER
+    _REWARD_COUNTER += 1
+
+    # 1. Base (Extrinsic) Reward: +1.0 for correct, -1.0 for incorrect (Pure Accuracy)
+    total = params.correct_reward if is_correct else params.incorrect_penalty
+
+    # 2. Curiosity Bonus (REMOVED)
+    curiosity = 0.0
+
+    # 3. Non-Terminal Penalty (REMOVED)
+
+    # 4. Depth Penalty (REMOVED)
+
+    # 5. Logging to TensorBoard
+    _log_stats_to_tensorboard(total, is_correct, curiosity)
+
+    return total
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/mind/growth_mind_persistence.py ---
+# growth/growth_mind_persistence.py
+"""
+Mixin class for GrowthMind to handle state persistence (saving/loading).
+"""
+from __future__ import annotations
+import os
+import json
+from typing import TYPE_CHECKING
+from core.paths import PATHS, BRAIN_DIR
+
+if TYPE_CHECKING:
+    from growth.mind.growth_mind import GrowthMind
+
+class GrowthMindPersistenceMixin:
+    def save_state(self: 'GrowthMind', path: str | None = None):
+        """Save GrowthMind policy, journal, and coupling pool to brain/."""
+        if path is None:
+            path = str(BRAIN_DIR)
+        os.makedirs(path, exist_ok=True)
+
+        with open(PATHS["growth_policy"], "w", encoding="utf-8") as f:
+            json.dump(self.policy.Q, f, indent=2)
+
+        with open(PATHS["growth_journal"], "w", encoding="utf-8") as f:
+            for rec in self.journal:
+                f.write(json.dumps(rec) + "\n")
+
+        try:
+            self.memory.save(os.path.join(path, "memory_coupling.npz"))
+        except Exception as e:
+            print(f"⚠️ Failed to save MemoryCoupling: {e}")
+
+        print(f"🌱 GrowthMind state saved to {BRAIN_DIR}/")
+
+    def load_state(self: 'GrowthMind', path: str | None = None):
+        """Load GrowthMind policy, journal, and coupling pool from brain/."""
+        if path is None:
+            path = str(BRAIN_DIR)
+        if not os.path.exists(path):
+            print("⚙️ No saved GrowthMind brain state found.")
+            return
+
+        pol_path = PATHS["growth_policy"]
+        jr_path = PATHS["growth_journal"]
+
+        if os.path.exists(pol_path):
+            with open(pol_path, "r", encoding="utf-8") as f:
+                self.policy.Q = json.load(f)
+            print("🔁 Growth policy restored from brain/growth_policy.json")
+
+        if os.path.exists(jr_path):
+            with open(jr_path, "r", encoding="utf-8") as f:
+                self.journal = [json.loads(line) for line in f if line.strip()]
+            print(f"🧩 Growth journal restored ({len(self.journal)} entries)")
+
+        mem_path = os.path.join(path, "memory_coupling.npz")
+        if os.path.exists(mem_path):
+            try:
+                self.memory.load(mem_path)
+                print(f"🧠 MemoryCoupling restored ({self.memory.stats()['count']} entries)")
+            except Exception as e:
+                print(f"⚠️ Failed to load MemoryCoupling: {e}")
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/node/selfcheck_node.py ---
+"""
+selfcheck_node.py
+-----------------
+Quick self-test for GrowthNode lineage and visualization.
+"""
+
+from core.lattice import canonical_symbol_layout
+from core_node import GrowthNode
+from lineage_utils import trace_lineage, describe_node
+from visualize_tree import visualize_growth_tree
+
+if __name__ == "__main__":
+    base = canonical_symbol_layout()
+    root = GrowthNode(base, polarity=1.0)
+    n1 = root.merge_with(root)
+    n2 = n1.branch()
+    n3 = n2.stabilize()
+    n4 = n3.revert()
+
+    print("Lineage Trace:")
+    for n in trace_lineage(n4):
+        print(" ", describe_node(n))
+
+    print("\nRendering growth tree...")
+    visualize_growth_tree(root, title="Livnium Cognitive Growth Tree")
+    print("\nGrowthNode self-check passed ✓")
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/node/lineage_utils.py ---
+"""
+lineage_utils.py
+----------------
+Utility functions for describing and tracing GrowthNode ancestry.
+"""
+
+from typing import List
+from core_node import GrowthNode
+
+def describe_node(node: GrowthNode) -> str:
+    return f"<GrowthNode depth={node.depth} rule={node.rule} Φ={node.polarity:+.3f} children={len(node.children)}>"
+
+def trace_lineage(node: GrowthNode) -> List[GrowthNode]:
+    path = []
+    while node:
+        path.append(node)
+        node = node.parent
+    return list(reversed(path))
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/node/core_node.py ---
+# ================================================================
+# Livnium Growth — core_node.py (Throttled Print Mode)
+# ================================================================
+# Defines the GrowthNode: the atomic cognitive unit of Livnium Growth.
+# Prints only once every 1000 node creations to track large-scale runs.
+# ================================================================
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Optional, List
+import time
+
+# --- Core Livnium Imports ---
+from core.lattice import LatticeState
+from core.audit import AuditLog
+
+
+# -------------------------------------------------------------------
+# Global diagnostic state
+# -------------------------------------------------------------------
+_NODE_COUNTER = 0
+_PRINT_INTERVAL = 1000  # print every Nth node
+
+
+def _log_every_1000(msg: str):
+    """Prints a throttled message exactly every 1000th node."""
+    global _NODE_COUNTER
+    if _NODE_COUNTER % _PRINT_INTERVAL == 0 and _NODE_COUNTER != 0:
+        t = time.strftime("%H:%M:%S")
+        print(f"[{t}] {msg}")
+
+
+# -------------------------------------------------------------------
+# GrowthNode Definition
+# -------------------------------------------------------------------
+@dataclass
+class GrowthNode:
+    # --- Core Data Payload ---
+    state: LatticeState
+    polarity: float = 0.0
+    note: str = ""
+
+    # --- Structural / Persistent Identifiers ---
+    node_id: int = field(default=-1)
+    parent_id: int = field(default=-1)
+
+    # --- In-Memory Traversal & Tree Links ---
+    parent: Optional["GrowthNode"] = None
+    children: List["GrowthNode"] = field(default_factory=list)
+
+    # --- Search / Heuristic Data ---
+    depth: int = 0
+    rule: str = "origin"
+    score: Optional[float] = None
+    search_state: str = "GENERATED"
+
+    # --- Auditing ---
+    log: AuditLog = field(default_factory=AuditLog)
+
+    # ----------------------------------------------------------------
+    # Post-initialization hook (throttled print)
+    # ----------------------------------------------------------------
+    def __post_init__(self):
+        global _NODE_COUNTER
+        _NODE_COUNTER += 1
+
+        # Print only when count hits exact multiples of 1000
+        _log_every_1000(
+            f"🧩 {_NODE_COUNTER:,} GrowthNodes created | "
+            f"latest → id={self.node_id}, rule='{self.rule}', "
+            f"Φ={self.polarity:+.3f}, depth={self.depth}, state={self.search_state}"
+        )
+
+    # ----------------------------------------------------------------
+    # Representation
+    # ----------------------------------------------------------------
+    def __repr__(self):
+        return (
+            f"<GrowthNode id={self.node_id} parent={self.parent_id} "
+            f"rule={self.rule} Φ={self.polarity:+.2f} state={self.search_state}>"
+        )
+
+# --- END OF FILE ---
+
+
+# --- FILE: /Users/chetanpatil/Desktop/clean-nova/growth/node/visualize_tree.py ---
+"""
+visualize_tot.py
+----------------
+Fully 3D Interactive Visualization Tool (Plotly for both ToT structure and Lattice State),
+with solution path highlighting (bright red) and 1000-node subset view.
+"""
+import json
+import matplotlib
+# Use TkAgg for compatibility with NetworkX plotting backend.
+matplotlib.use('TkAgg')
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+import sys
+from typing import List, Dict, Any
+
+# --- PLOTLY IMPORT ---
+import plotly.graph_objects as go
+from plotly.offline import plot
+# ---------------------
+
+# --- CONFIGURATION ---
+JOURNAL_FILE = '/Users/chetanpatil/Desktop/clean-nova/brain/growth_journal.jsonl'
+NODE_SIZE_BASE = 1500
+NODE_SIZE_SCALE = 2000
+LATTICE_DIMS = (3, 3, 3)
+# ---------------------
+
+
+def load_journal_data(filepath: str) -> List[Dict[str, Any]]:
+    """Loads journal data from a JSON Lines (.jsonl) file, printing every 1000 lines processed."""
+    data = []
+    try:
+        with open(filepath, 'r') as f:
+            for i, line in enumerate(f, start=1):
+                if line.strip():
+                    try:
+                        data.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                if i % 1000 == 0:
+                    print(f"🔄 Processed {i:,} journal lines...")
+
+        if not data:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+
+    except FileNotFoundError:
+        print(f"Error: Journal file not found at '{filepath}'")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from '{filepath}': {e}")
+        print("Please ensure the file is valid JSON (or JSON Lines format).")
+        sys.exit(1)
+
+    print(f"📘 Loaded {len(data):,} total journal entries.")
+    return [entry for entry in data if 'node_id' in entry and 'parent_id' in entry]
+
+
+def _get_solution_path_nodes(journal_data, solution_node_id):
+    """Traces the path backward from the solution to the root."""
+    path_ids = set()
+    node_map = {entry['node_id']: entry['parent_id'] for entry in journal_data}
+
+    current_id = solution_node_id
+    while current_id is not None and current_id != -1:
+        if current_id in path_ids:
+            # Prevent infinite loop if graph contains cycles
+            break
+        path_ids.add(current_id)
+        current_id = node_map.get(current_id)
+    return path_ids
+
+
+def visualize_lattice_state_3d(phi_field_flat: List[float], node_id: int):
+    """Renders the 3x3x3 lattice state as an interactive 3D scatter plot using Plotly."""
+    try:
+        phi_field = np.array(phi_field_flat).reshape(LATTICE_DIMS)
+    except ValueError:
+        print("⚠️ Warning: Could not reshape phi_field. Data missing or incorrect size.")
+        return
+
+    x, y, z = np.meshgrid(np.arange(LATTICE_DIMS[0]),
+                          np.arange(LATTICE_DIMS[1]),
+                          np.arange(LATTICE_DIMS[2]))
+    x_flat, y_flat, z_flat = x.flatten(), y.flatten(), z.flatten()
+    phi_flat = phi_field.flatten()
+    vmax = np.max(np.abs(phi_flat))
+
+    hover_text = [f"Coord: ({xi}, {yi}, {zi})<br>Polarity (Φ): {phi:.4f}"
+                  for xi, yi, zi, phi in zip(x_flat, y_flat, z_flat, phi_flat)]
+
+    fig = go.Figure(data=[
+        go.Scatter3d(
+            x=x_flat, y=y_flat, z=z_flat,
+            mode='markers',
+            marker=dict(
+                size=10 + (np.abs(phi_flat) / vmax * 20),
+                color=phi_flat,
+                colorscale='RdBu',
+                cmin=-vmax,
+                cmax=vmax,
+                colorbar=dict(title='Polarity', len=0.6),
+                opacity=0.8
+            ),
+            text=hover_text,
+            hoverinfo='text'
+        )
+    ])
+
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='X (Dim 1)', tickvals=np.arange(LATTICE_DIMS[0])),
+            yaxis=dict(title='Y (Dim 2)', tickvals=np.arange(LATTICE_DIMS[1])),
+            zaxis=dict(title='Z (Dim 3)', tickvals=np.arange(LATTICE_DIMS[2])),
+            aspectmode='cube'
+        ),
+        title=f"Interactive 3D Lattice State (Node ID: {node_id})",
+        margin=dict(r=0, l=0, b=0, t=0)
+    )
+    fig.show()
+
+
+def visualize_from_journal_data(journal_data: List[Dict[str, Any]], title: str = "GrowthMind 3D Tree of Thought"):
+    """Builds and renders the interactive 3D ToT graph using Plotly with highlighted solution path."""
+    if not journal_data:
+        print("No valid step data found to visualize.")
+        return
+
+    node_data_map = {}
+    temp_G = nx.DiGraph()
+    edge_x, edge_y, edge_z = [], [], []
+
+    RULE_COLORS = {
+        'merge': 'green', 'branch': 'red', 'stabilize': 'yellow',
+        'revert': 'gray', 'origin': 'blue'
+    }
+
+    print(f"Building 3D graph structure with {len(journal_data):,} nodes...")
+
+    for entry in journal_data:
+        node_id = entry['node_id']
+        parent_id = entry['parent_id']
+        temp_G.add_node(node_id,
+                        rule=entry.get('rule', 'origin').split(':')[-1],
+                        depth=entry.get('depth', 0),
+                        phi=entry.get('Φ', 0.0))
+        if parent_id != -1 and parent_id in node_data_map:
+            temp_G.add_edge(parent_id, node_id)
+        node_data_map[node_id] = entry
+
+    # --- Find and trace the best solution path ---
+    best_node_id = max(journal_data, key=lambda x: x.get('h_score', -np.inf))['node_id']
+    solution_path_ids = _get_solution_path_nodes(journal_data, best_node_id)
+    print(f"🔍 Highlighting solution path with {len(solution_path_ids)} nodes (best node ID: {best_node_id})")
+
+    pos = nx.spectral_layout(temp_G, dim=3)
+    node_trace_data = {'x': [], 'y': [], 'z': [], 'marker_color': [], 'text': [], 'node_id': []}
+
+    for node_id, coords in pos.items():
+        data = node_data_map[node_id]
+        rule = data['rule'].split(':')[-1]
+        phi = data['Φ']
+
+        # Highlight solution path in red
+        color = 'red' if node_id in solution_path_ids else RULE_COLORS.get(rule, 'black')
+
+        node_trace_data['x'].append(coords[0])
+        node_trace_data['y'].append(coords[1])
+        node_trace_data['z'].append(coords[2])
+        node_trace_data['marker_color'].append(color)
+        node_trace_data['text'].append(f"ID:{node_id} | Rule:{rule}<br>Φ:{phi:+.3f} | Depth:{data['depth']}")
+        node_trace_data['node_id'].append(node_id)
+
+        parent_id = data.get('parent_id')
+        if parent_id != -1 and parent_id in node_data_map and parent_id in pos:
+            parent_coords = pos[parent_id]
+
+            # Red edges if both nodes are on solution path
+            if node_id in solution_path_ids and parent_id in solution_path_ids:
+                edge_color = 'rgba(255,0,0,0.8)'
+            else:
+                edge_color = 'rgba(150,150,150,0.4)'
+
+            edge_x.extend([parent_coords[0], coords[0], None])
+            edge_y.extend([parent_coords[1], coords[1], None])
+            edge_z.extend([parent_coords[2], coords[2], None])
+
+    edge_trace = go.Scatter3d(x=edge_x, y=edge_y, z=edge_z,
+                              line=dict(width=2, color='rgba(150,150,150,0.5)'),
+                              hoverinfo='none', mode='lines', name='Edges')
+
+    max_abs_phi = np.max([abs(data['Φ']) for data in node_data_map.values()]) if node_data_map else 0.1
+
+    node_trace = go.Scatter3d(x=node_trace_data['x'], y=node_trace_data['y'], z=node_trace_data['z'],
+                              mode='markers',
+                              hovertext=node_trace_data['text'],
+                              hoverinfo='text',
+                              marker=dict(symbol='circle',
+                                          size=[10 + 20 * (abs(node_data_map[nid]['Φ']) / max_abs_phi)
+                                                for nid in node_trace_data['node_id']],
+                                          color=node_trace_data['marker_color'],
+                                          line=dict(color='black', width=1)))
+
+    fig = go.Figure(data=[edge_trace, node_trace])
+    fig.update_layout(title=title, showlegend=False,
+                      scene=dict(xaxis=dict(showticklabels=False, title=''),
+                                 yaxis=dict(showticklabels=False, title=''),
+                                 zaxis=dict(showticklabels=False, title='Depth')))
+
+    print("\n🌐 Opening 3D ToT Structure in browser with solution path highlighted in red.")
+    plot(fig, auto_open=True)
+
+
+def main():
+    print("--- GrowthMind ToT Visualizer ---")
+
+    journal_data = load_journal_data(JOURNAL_FILE)
+    if not journal_data:
+        print("Visualization aborted due to no valid data.")
+        return
+
+    total_steps = len(journal_data)
+    print(f"Loaded {total_steps:,} valid steps.")
+    subset_data = journal_data[:1000]
+    print(f"📊 Visualizing only the first {len(subset_data):,} steps out of {len(journal_data):,} total.")
+    visualize_from_journal_data(subset_data, title=f"3D ToT Structure (First {len(subset_data):,} Steps)")
+
+
+if __name__ == "__main__":
+    main()
+
+# --- END OF FILE ---

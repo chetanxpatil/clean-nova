@@ -1,6 +1,9 @@
 
 
 from __future__ import annotations
+
+from types import NoneType
+
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Any
@@ -135,7 +138,7 @@ class LatticeState:
     # Symbol utilities
     # ---------------------------------------------------------------
 
-    def get_symbol(self, x: int, y: int, z: int) -> str:
+    def get_symbol(self, x: int, y: int, z: int) -> type[NoneType[Any, Any, Any]]:
         return self.cells[x, y, z]
 
     def set_symbol(self, x: int, y: int, z: int, value: str) -> None:

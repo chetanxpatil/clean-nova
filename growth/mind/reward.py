@@ -1,65 +1,87 @@
-# --- New File: growth/mind/reward.py ---
-from __future__ import annotations
+# --- File: growth/reward.py (Accuracy-Only Reward) ---
 from dataclasses import dataclass
 import numpy as np
-from typing import Optional, TYPE_CHECKING, Any
+import time
+from typing import TYPE_CHECKING
+from torch.utils.tensorboard import SummaryWriter
 
 if TYPE_CHECKING:
     from growth.mind.growth_mind import GrowthMind
     from growth.node.core_node import GrowthNode
 
+# --- Global Initialization and Constants ---
+TENSORBOARD_WRITER = SummaryWriter(f'runs/growth_exp_{time.strftime("%Y%m%d-%H%M%S")}')
 
-# Define the parameters for reward shaping
+# Logging State
+_REWARD_COUNTER = 0
+_TOTAL_REWARD_SUM = 0.0
+_PRINT_INTERVAL = 5000  # Keeping speed optimization
+_STATS_BUFFER = []
+
+
+# --- Reward Parameters (Accuracy Only) ---
 @dataclass
 class RewardParams:
+    # ONLY these two parameters remain
     correct_reward: float = +1.0
     incorrect_penalty: float = -1.0
-    # Bonus for being uncertain/curious (Risk-to-Reward)
-    r2r_multiplier: float = 0.1
-    r2r_max_bonus: float = 0.5
+    # All intrinsic (r2r_multiplier, depth_penalty, etc.) parameters removed.
 
-    # --- CRITICAL FIX: Non-Terminal Penalty (Negative) ---
-    non_terminal_penalty: float = -0.1
-    depth_penalty: float = -0.01
+
+# --- Core Logic Functions ---
+
+def _safe_mean(x: np.ndarray) -> float:
+    return float(np.mean(x)) if len(x) > 0 else 0.0
+
+
+def _log_stats_to_tensorboard(total: float, is_correct: bool, curiosity: float):
+    """Updates the global buffer and logs to TensorBoard on the interval."""
+    global _REWARD_COUNTER, _STATS_BUFFER, _TOTAL_REWARD_SUM
+
+    # curiosity is always 0.0 in this setup but is included for consistent logging structure
+    _STATS_BUFFER.append({"total": total, "is_correct": is_correct, "curiosity": curiosity})
+
+    if _REWARD_COUNTER % _PRINT_INTERVAL == 0 and _REWARD_COUNTER != 0:
+        stats = np.array([d["total"] for d in _STATS_BUFFER])
+        corrects = sum(d["is_correct"] for d in _STATS_BUFFER)
+        curiosity_vals = [d["curiosity"] for d in _STATS_BUFFER]
+        buffer_len = len(_STATS_BUFFER)
+
+        _TOTAL_REWARD_SUM += np.sum(stats)
+        avg_cumulative_reward = _TOTAL_REWARD_SUM / _REWARD_COUNTER
+
+        # TensorBoard Logging
+        TENSORBOARD_WRITER.add_scalar('Performance/Accuracy', corrects / buffer_len, _REWARD_COUNTER)
+        TENSORBOARD_WRITER.add_scalar('Reward/Mean_Total_Reward', _safe_mean(stats), _REWARD_COUNTER)
+        TENSORBOARD_WRITER.add_scalar('Intrinsic/Avg_Curiosity_Bonus', _safe_mean(curiosity_vals), _REWARD_COUNTER)
+        TENSORBOARD_WRITER.add_scalar('Reward/Cumulative_Reward', avg_cumulative_reward, _REWARD_COUNTER)
+        TENSORBOARD_WRITER.flush()
+
+        _STATS_BUFFER.clear()
 
 
 def compute_total_reward(
         *,
-        mind: GrowthMind,
-        solution_node: GrowthNode,
+        mind: "GrowthMind",
+        solution_node: "GrowthNode",
         is_correct: bool,
         params: RewardParams,
 ) -> float:
-    """
-    Computes the total reward for a path, including shaping.
-    This replaces the simple +1/-1 and provides the rich signal needed for learning.
-    """
+    """Calculates the total reward for a path based ONLY on extrinsic correctness."""
+    global _REWARD_COUNTER
+    _REWARD_COUNTER += 1
 
-    # 1. Base (Extrinsic) Reward
+    # 1. Base (Extrinsic) Reward: +1.0 for correct, -1.0 for incorrect (Pure Accuracy)
     total = params.correct_reward if is_correct else params.incorrect_penalty
-    final_rule = solution_node.rule.split(':')[-1]
 
-    # --- FIX 1: Curiosity / R2R Bonus ---
-    # We use the mind's temperature as a proxy for uncertainty.
-    # We must ensure TEMP_MAX (0.50) is used in normalization.
-    uncertainty = (mind.temperature - 0.02) / (0.50 - 0.02)
-    uncertainty = np.clip(uncertainty, 0, 1)
+    # 2. Curiosity Bonus (REMOVED)
+    curiosity = 0.0
 
-    curiosity = params.r2r_max_bonus * uncertainty * params.r2r_multiplier
-    total += curiosity
+    # 3. Non-Terminal Penalty (REMOVED)
 
-    # 3. Apply Penalties
+    # 4. Depth Penalty (REMOVED)
 
-    # A) Penalize if the *final answer* is non-terminal (stabilize/revert/origin/noop)
-    # This prevents the AI from defaulting to the root node (origin/noop).
-    if final_rule in ("stabilize", "revert", "noop", "origin"):
-        # ...UNLESS it was the correct answer!
-        if not is_correct:
-            total += params.non_terminal_penalty
-        # (If it IS correct, it gets the +1.0 base reward, fixing the 0% neutral bug)
+    # 5. Logging to TensorBoard
+    _log_stats_to_tensorboard(total, is_correct, curiosity)
 
-    # B) Penalize for depth
-    # This is the term that often cancels the curiosity bonus.
-    total += solution_node.depth * params.depth_penalty
-
-    return float(total)  # Ensure return type is float
+    return total

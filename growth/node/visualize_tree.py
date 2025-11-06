@@ -1,7 +1,8 @@
 """
 visualize_tot.py
 ----------------
-Fully 3D Interactive Visualization Tool (Plotly for both ToT structure and Lattice State).
+Fully 3D Interactive Visualization Tool (Plotly for both ToT structure and Lattice State),
+with solution path highlighting (bright red) and 1000-node subset view.
 """
 import json
 import matplotlib
@@ -12,7 +13,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import sys
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 # --- PLOTLY IMPORT ---
 import plotly.graph_objects as go
@@ -28,16 +29,23 @@ LATTICE_DIMS = (3, 3, 3)
 
 
 def load_journal_data(filepath: str) -> List[Dict[str, Any]]:
-    """Loads journal data from a JSON Lines (.jsonl) file."""
+    """Loads journal data from a JSON Lines (.jsonl) file, printing every 1000 lines processed."""
     data = []
     try:
         with open(filepath, 'r') as f:
-            for line in f:
+            for i, line in enumerate(f, start=1):
                 if line.strip():
-                    data.append(json.loads(line))
+                    try:
+                        data.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                if i % 1000 == 0:
+                    print(f"🔄 Processed {i:,} journal lines...")
+
         if not data:
             with open(filepath, 'r') as f:
                 data = json.load(f)
+
     except FileNotFoundError:
         print(f"Error: Journal file not found at '{filepath}'")
         sys.exit(1)
@@ -45,36 +53,44 @@ def load_journal_data(filepath: str) -> List[Dict[str, Any]]:
         print(f"Error decoding JSON from '{filepath}': {e}")
         print("Please ensure the file is valid JSON (or JSON Lines format).")
         sys.exit(1)
+
+    print(f"📘 Loaded {len(data):,} total journal entries.")
     return [entry for entry in data if 'node_id' in entry and 'parent_id' in entry]
 
 
+def _get_solution_path_nodes(journal_data, solution_node_id):
+    """Traces the path backward from the solution to the root."""
+    path_ids = set()
+    node_map = {entry['node_id']: entry['parent_id'] for entry in journal_data}
+
+    current_id = solution_node_id
+    while current_id is not None and current_id != -1:
+        if current_id in path_ids:
+            # Prevent infinite loop if graph contains cycles
+            break
+        path_ids.add(current_id)
+        current_id = node_map.get(current_id)
+    return path_ids
+
+
 def visualize_lattice_state_3d(phi_field_flat: List[float], node_id: int):
-    """
-    Renders the 3x3x3 lattice state as an interactive 3D scatter plot using Plotly.
-    The plot will open in your web browser, allowing rotation and zoom.
-    """
+    """Renders the 3x3x3 lattice state as an interactive 3D scatter plot using Plotly."""
     try:
         phi_field = np.array(phi_field_flat).reshape(LATTICE_DIMS)
     except ValueError:
         print("⚠️ Warning: Could not reshape phi_field. Data missing or incorrect size.")
         return
 
-    # 1. Prepare Data for Scatter Plot
     x, y, z = np.meshgrid(np.arange(LATTICE_DIMS[0]),
                           np.arange(LATTICE_DIMS[1]),
                           np.arange(LATTICE_DIMS[2]))
-
-    x_flat = x.flatten()
-    y_flat = y.flatten()
-    z_flat = z.flatten()
+    x_flat, y_flat, z_flat = x.flatten(), y.flatten(), z.flatten()
     phi_flat = phi_field.flatten()
-
     vmax = np.max(np.abs(phi_flat))
 
     hover_text = [f"Coord: ({xi}, {yi}, {zi})<br>Polarity (Φ): {phi:.4f}"
                   for xi, yi, zi, phi in zip(x_flat, y_flat, z_flat, phi_flat)]
 
-    # 2. Create Plotly Figure
     fig = go.Figure(data=[
         go.Scatter3d(
             x=x_flat, y=y_flat, z=z_flat,
@@ -93,7 +109,6 @@ def visualize_lattice_state_3d(phi_field_flat: List[float], node_id: int):
         )
     ])
 
-    # 3. Layout and Axes Configuration
     fig.update_layout(
         scene=dict(
             xaxis=dict(title='X (Dim 1)', tickvals=np.arange(LATTICE_DIMS[0])),
@@ -104,24 +119,17 @@ def visualize_lattice_state_3d(phi_field_flat: List[float], node_id: int):
         title=f"Interactive 3D Lattice State (Node ID: {node_id})",
         margin=dict(r=0, l=0, b=0, t=0)
     )
-
     fig.show()
 
 
 def visualize_from_journal_data(journal_data: List[Dict[str, Any]], title: str = "GrowthMind 3D Tree of Thought"):
-    """
-    Builds and renders the interactive 3D ToT graph using Plotly.
-    """
+    """Builds and renders the interactive 3D ToT graph using Plotly with highlighted solution path."""
     if not journal_data:
         print("No valid step data found to visualize.")
         return
 
-    # 1. Prepare Data and Graphs
     node_data_map = {}
     temp_G = nx.DiGraph()
-
-    # Store coordinates for Plotly
-    coord_x, coord_y, coord_z = {}, {}, {}
     edge_x, edge_y, edge_z = [], [], []
 
     RULE_COLORS = {
@@ -129,28 +137,25 @@ def visualize_from_journal_data(journal_data: List[Dict[str, Any]], title: str =
         'revert': 'gray', 'origin': 'blue'
     }
 
-    print(f"Building 3D graph structure with {len(journal_data)} nodes...")
+    print(f"Building 3D graph structure with {len(journal_data):,} nodes...")
 
-    # A. Build the NetworkX graph and map data
     for entry in journal_data:
         node_id = entry['node_id']
         parent_id = entry['parent_id']
-
-        # Build the graph structure for layout calculation
         temp_G.add_node(node_id,
                         rule=entry.get('rule', 'origin').split(':')[-1],
                         depth=entry.get('depth', 0),
-                        phi=entry.get('Φ', 0.0)) # Store phi here for later size calculation
-
+                        phi=entry.get('Φ', 0.0))
         if parent_id != -1 and parent_id in node_data_map:
             temp_G.add_edge(parent_id, node_id)
-
         node_data_map[node_id] = entry
 
-    # B. Generate 3D Coordinates using NetworkX Layout (Only for nodes in the subset)
-    pos = nx.spectral_layout(temp_G, dim=3)
+    # --- Find and trace the best solution path ---
+    best_node_id = max(journal_data, key=lambda x: x.get('h_score', -np.inf))['node_id']
+    solution_path_ids = _get_solution_path_nodes(journal_data, best_node_id)
+    print(f"🔍 Highlighting solution path with {len(solution_path_ids)} nodes (best node ID: {best_node_id})")
 
-    # C. Prepare Plotly Data
+    pos = nx.spectral_layout(temp_G, dim=3)
     node_trace_data = {'x': [], 'y': [], 'z': [], 'marker_color': [], 'text': [], 'node_id': []}
 
     for node_id, coords in pos.items():
@@ -158,50 +163,41 @@ def visualize_from_journal_data(journal_data: List[Dict[str, Any]], title: str =
         rule = data['rule'].split(':')[-1]
         phi = data['Φ']
 
-        # 1. Node Data
-        coord_x[node_id] = coords[0]
-        coord_y[node_id] = coords[1]
-        coord_z[node_id] = coords[2]
+        # Highlight solution path in red
+        color = 'red' if node_id in solution_path_ids else RULE_COLORS.get(rule, 'black')
 
         node_trace_data['x'].append(coords[0])
         node_trace_data['y'].append(coords[1])
         node_trace_data['z'].append(coords[2])
-        node_trace_data['marker_color'].append(RULE_COLORS.get(rule, 'black'))
-        node_trace_data['text'].append(f"ID:{node_id} | Rule: {rule}<br>Φ:{phi:+.3f} | Depth:{data['depth']}")
+        node_trace_data['marker_color'].append(color)
+        node_trace_data['text'].append(f"ID:{node_id} | Rule:{rule}<br>Φ:{phi:+.3f} | Depth:{data['depth']}")
         node_trace_data['node_id'].append(node_id)
 
-
-        # 2. Edge Data
         parent_id = data.get('parent_id')
-        if parent_id != -1 and parent_id in node_data_map:
+        if parent_id != -1 and parent_id in node_data_map and parent_id in pos:
+            parent_coords = pos[parent_id]
 
-            # --- FIX: Check if the parent_id is in the POS dictionary ---
-            if parent_id in pos:
-                parent_coords = pos[parent_id]
-                parent_phi = node_data_map[parent_id]['Φ']
-                # delta_phi = abs(phi - parent_phi) # (Not used in the trace, but useful for debugging)
+            # Red edges if both nodes are on solution path
+            if node_id in solution_path_ids and parent_id in solution_path_ids:
+                edge_color = 'rgba(255,0,0,0.8)'
+            else:
+                edge_color = 'rgba(150,150,150,0.4)'
 
-                # Add line trace coordinates
-                edge_x.extend([parent_coords[0], coords[0], None])
-                edge_y.extend([parent_coords[1], coords[1], None])
-                edge_z.extend([parent_coords[2], coords[2], None])
-            # --- End Fix ---
+            edge_x.extend([parent_coords[0], coords[0], None])
+            edge_y.extend([parent_coords[1], coords[1], None])
+            edge_z.extend([parent_coords[2], coords[2], None])
 
-
-    # 3. Create Plotly Figure
     edge_trace = go.Scatter3d(x=edge_x, y=edge_y, z=edge_z,
                               line=dict(width=2, color='rgba(150,150,150,0.5)'),
                               hoverinfo='none', mode='lines', name='Edges')
 
-    # Get max phi magnitude for sizing
     max_abs_phi = np.max([abs(data['Φ']) for data in node_data_map.values()]) if node_data_map else 0.1
 
     node_trace = go.Scatter3d(x=node_trace_data['x'], y=node_trace_data['y'], z=node_trace_data['z'],
-                              mode='markers', # Removed text mode for cleaner 3D
+                              mode='markers',
                               hovertext=node_trace_data['text'],
                               hoverinfo='text',
                               marker=dict(symbol='circle',
-                                          # Use stored phi magnitude for sizing
                                           size=[10 + 20 * (abs(node_data_map[nid]['Φ']) / max_abs_phi)
                                                 for nid in node_trace_data['node_id']],
                                           color=node_trace_data['marker_color'],
@@ -213,12 +209,11 @@ def visualize_from_journal_data(journal_data: List[Dict[str, Any]], title: str =
                                  yaxis=dict(showticklabels=False, title=''),
                                  zaxis=dict(showticklabels=False, title='Depth')))
 
-    print("\n🌐 Opening 3D ToT Structure in browser. Use the Plotly menu to rotate and zoom.")
+    print("\n🌐 Opening 3D ToT Structure in browser with solution path highlighted in red.")
     plot(fig, auto_open=True)
 
 
 def main():
-    """Main execution block to load data and run visualization."""
     print("--- GrowthMind ToT Visualizer ---")
 
     journal_data = load_journal_data(JOURNAL_FILE)
@@ -227,17 +222,10 @@ def main():
         return
 
     total_steps = len(journal_data)
-    unique_parent_ids = set(entry['parent_id'] for entry in journal_data if entry.get('parent_id') != -1)
-    if total_steps > 1 and len(unique_parent_ids) == total_steps - 1:
-        print(f"⚠️ Warning: Detected {total_steps} steps with only {len(unique_parent_ids)} unique parents.")
-
-    print(f"Loaded {total_steps} valid steps.")
-
-    # Filter data for a small subset (e.g., first sample's path)
-    subset_data = journal_data
-
-    visualize_from_journal_data(subset_data,
-                                title=f"3D ToT Structure (First {len(subset_data)} Steps)")
+    print(f"Loaded {total_steps:,} valid steps.")
+    subset_data = journal_data[:1000]
+    print(f"📊 Visualizing only the first {len(subset_data):,} steps out of {len(journal_data):,} total.")
+    visualize_from_journal_data(subset_data, title=f"3D ToT Structure (First {len(subset_data):,} Steps)")
 
 
 if __name__ == "__main__":
