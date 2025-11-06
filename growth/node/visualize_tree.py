@@ -85,7 +85,7 @@ def visualize_lattice_state_3d(phi_field_flat: List[float], node_id: int):
                 colorscale='RdBu',
                 cmin=-vmax,
                 cmax=vmax,
-                colorbar=dict(title='Polarity ($\Phi$)', len=0.6),
+                colorbar=dict(title='Polarity', len=0.6),
                 opacity=0.8
             ),
             text=hover_text,
@@ -234,7 +234,7 @@ def main():
     print(f"Loaded {total_steps} valid steps.")
 
     # Filter data for a small subset (e.g., first sample's path)
-    subset_data = journal_data[:100]
+    subset_data = journal_data
 
     visualize_from_journal_data(subset_data,
                                 title=f"3D ToT Structure (First {len(subset_data)} Steps)")

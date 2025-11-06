@@ -1,7 +1,7 @@
 """
-GrowthMind dynamics visualizer with insight overlays.
-Displays Φ oscillations, entropy trends, adaptive thresholds,
-and evolving policy trajectories with stability–adaptation insight.
+GrowthMind dynamics visualizer (NEW ARCHITECTURE)
+Displays Φ oscillations and the evolution of the
+Policy Heuristic Scores (Q-values) from the search journal.
 """
 
 import json
@@ -9,195 +9,145 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 from pathlib import Path
+import pandas as pd
 
 # -------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent  # project root
 JOURNAL_PATH = BASE_DIR / "brain" / "growth_journal.jsonl"
-NORMALIZE_MODE = "relative"  # "relative" or "absolute"
-OUT_PATH = BASE_DIR / "analysis" / "growth_dynamics.png"
-
-RULES = ["stabilize", "merge", "branch", "revert"]
+OUT_PATH = BASE_DIR / "analysis" / "growth_dynamics_new.png"
 
 
 # -------------------------------------------------------------------
-# Load journal
+# Load and Extract
 # -------------------------------------------------------------------
-def load_journal(path: Path):
-    """Load GrowthMind JSONL journal into a list of records."""
+def load_and_extract_stats(path: Path):
+    """Load the new SearchOrchestrator journal and extract key stats."""
     if not path.exists():
         raise FileNotFoundError(f"No journal found at {path}")
+
     records = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             try:
-                records.append(json.loads(line))
+                # Filter for valid node entries only
+                entry = json.loads(line)
+                if 'node_id' in entry and 'heuristic_score' in entry:
+                    records.append(entry)
             except json.JSONDecodeError:
                 continue
-    print(f"📘 Loaded {len(records)} entries from {path}")
-    return records
 
+    print(f"📘 Loaded {len(records)} valid node entries from {path}")
 
-# -------------------------------------------------------------------
-# Extract statistics (Φ, entropy, π, thresholds, etc.)
-# -------------------------------------------------------------------
-def extract_stats(records):
-    steps, phi, entropy, temp = [], [], [], []
-    stabilize, merge, branch, revert = [], [], [], []
-    merge_thresh, branch_thresh = [], []
+    if not records:
+        print("No valid node data found. Exiting.")
+        return None
 
-    current_pi = {k: 0.25 for k in RULES}
-    found_initial_pi = False
+    # Convert to DataFrame for easy analysis
+    df = pd.DataFrame(records)
 
-    for r in records:
-        if "π" in r:
-            current_pi = r["π"]
-            found_initial_pi = True
-            break
-        elif "Δπ" in r and "Φ" in r:
-            current_pi = {k: 0.0 for k in RULES}
-            break
+    # Clean the rule name (e.g., "G1:merge" -> "merge")
+    df['rule'] = df['rule'].apply(lambda x: x.split(':')[-1])
 
-    if not found_initial_pi and not any("Δπ" in r for r in records):
-        current_pi = {k: 0.0 for k in RULES}
-
-    for i, r in enumerate(records):
-        if "Φ" not in r:
-            continue
-
-        steps.append(i)
-        phi.append(r["Φ"])
-        entropy.append(r.get("entropy", np.nan))
-        temp.append(r.get("temperature", np.nan))
-
-        # --- Threshold tracking ---
-        th = r.get("thresholds", {})
-        merge_thresh.append(th.get("merge_min_phi", np.nan))
-        branch_thresh.append(th.get("branch_max_phi", np.nan))
-
-        # --- Policy update ---
-        if "Δπ" in r:
-            for k, v in r["Δπ"].items():
-                current_pi[k] = current_pi.get(k, 0.0) + v
-        elif "π" in r:
-            current_pi = r["π"]
-
-        # Decay and normalize
-        for k in current_pi:
-            current_pi[k] *= 0.985
-        total = sum(current_pi.values())
-        if total != 0:
-            for k in current_pi:
-                current_pi[k] /= total
-
-        stabilize.append(current_pi.get("stabilize", 0.0))
-        merge.append(current_pi.get("merge", 0.0))
-        branch.append(current_pi.get("branch", 0.0))
-        revert.append(current_pi.get("revert", 0.0))
-
-    return {
-        "steps": np.array(steps),
-        "phi": np.array(phi),
-        "entropy": np.array(entropy),
-        "temperature": np.array(temp),
-        "stabilize": np.array(stabilize),
-        "merge": np.array(merge),
-        "branch": np.array(branch),
-        "revert": np.array(revert),
-        "merge_thresh": np.array(merge_thresh),
-        "branch_thresh": np.array(branch_thresh),
+    # Extract data for plotting
+    stats = {
+        "steps": df.index.values,
+        "phi": df["Φ"].values,
+        "heuristic_score": df["heuristic_score"].values,
+        "rules": df["rule"].values
     }
 
+    # Get heuristic scores split by rule
+    stats["merge_scores"] = df[df['rule'] == 'merge']['heuristic_score']
+    stats["branch_scores"] = df[df['rule'] == 'branch']['heuristic_score']
+    stats["stabilize_scores"] = df[df['rule'] == 'stabilize']['heuristic_score']
 
-# -------------------------------------------------------------------
-# Normalize for better visualization
-# -------------------------------------------------------------------
-def normalize_policy(stats, mode="relative"):
-    """Normalize Q-policy trajectories for plotting clarity."""
-    if mode == "absolute":
-        all_vals = np.vstack([stats[k] for k in RULES])
-        max_val = np.max(np.abs(all_vals)) or 1.0
-        for k in RULES:
-            stats[k] = stats[k] / max_val
-    else:
-        for k in RULES:
-            vals = stats[k]
-            min_val, max_val = np.min(vals), np.max(vals)
-            stats[k] = (vals - min_val) / (max_val - min_val + 1e-9)
     return stats
 
 
 # -------------------------------------------------------------------
 # Plot GrowthMind dynamics
 # -------------------------------------------------------------------
-def plot_dynamics(s, records=None):
-    """Generate multi-panel visualization of GrowthMind internal dynamics."""
-    s = normalize_policy(s, NORMALIZE_MODE)
+def plot_dynamics(s):
+    """Generate multi-panel visualization of the new architecture's dynamics."""
+
     steps = s["steps"]
+    if len(steps) == 0:
+        print("No data to plot.")
+        return
 
-    # Adaptive smoothing based on log length
+    # Adaptive smoothing
     sigma = max(5, len(steps) // 200)
-    φ_smooth = gaussian_filter1d(s["phi"], sigma=sigma)
-    entropy_smooth = gaussian_filter1d(np.nan_to_num(s["entropy"]), sigma=sigma)
-    temp_smooth = gaussian_filter1d(np.nan_to_num(s["temperature"]), sigma=sigma)
 
-    fig, axes = plt.subplots(4, 1, figsize=(13, 13), sharex=True)
+    # --- FIX: Use GridSpec for a mixed-axis layout ---
+    # We can't use sharex=True for all plots
+    fig = plt.figure(figsize=(13, 10))
+    gs = fig.add_gridspec(3, 1) # 3 rows, 1 column
 
-    # --- Φ Dynamics + Adaptive Thresholds ---
-    axes[0].plot(steps, φ_smooth, color="teal", label="Φ (smoothed)", linewidth=1.6)
-    axes[0].fill_between(steps, φ_smooth - 0.1, φ_smooth + 0.1, color="teal", alpha=0.15)
-    axes[0].plot(steps, s["merge_thresh"], "--", color="blue", alpha=0.6, label="merge_thresh")
-    axes[0].plot(steps, s["branch_thresh"], "--", color="red", alpha=0.6, label="branch_thresh")
-    axes[0].axhline(0, color="gray", ls="--", lw=0.8)
-    axes[0].set_ylabel("Φ (polarity)")
-    axes[0].set_title("Φ Dynamics and Adaptive Thresholds")
-    axes[0].legend()
-    axes[0].grid(alpha=0.3)
+    # Top two plots (time-series) share an X-axis
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax1 = fig.add_subplot(gs[1, 0], sharex=ax0)
 
-    # --- Entropy and Temperature ---
-    axes[1].plot(steps, entropy_smooth, color="purple", label="Entropy", linewidth=1.4)
-    ax2 = axes[1].twinx()
-    ax2.plot(steps, temp_smooth, color="orange", alpha=0.6, label="Temperature")
-    axes[1].axhline(1.5, color="gray", ls=":", lw=0.8)
-    axes[1].set_ylabel("Entropy (bits)", color="purple")
-    ax2.set_ylabel("Temperature", color="orange")
-    axes[1].set_title("Entropy–Temperature Coupling")
-    axes[1].grid(alpha=0.3)
+    # Bottom plot (categorical) has its own X-axis
+    ax2 = fig.add_subplot(gs[2, 0])
 
-    # --- Policy Evolution (stacked) ---
-    axes[2].stackplot(
-        steps,
-        s["stabilize"], s["merge"], s["branch"], s["revert"],
-        labels=RULES,
-        colors=["#66c2a5", "#8da0cb", "#fc8d62", "#e78ac3"],
-        alpha=0.85
-    )
-    axes[2].set_ylabel("Normalized Policy Weight")
-    axes[2].legend(loc="upper left")
-    axes[2].set_title(f"Policy Evolution ({NORMALIZE_MODE.capitalize()} trajectories)")
-    axes[2].grid(alpha=0.3)
+    # Hide the x-tick labels on the top plot (ax0)
+    plt.setp(ax0.get_xticklabels(), visible=False)
+    # -------------------------------------------------
 
-    # --- Stability vs Adaptation ---
-    window = 200
-    φ_var = np.array([np.var(s["phi"][max(0, i - window): i + 1]) for i in range(len(s["phi"]))])
-    gap = s["merge_thresh"] - s["branch_thresh"]
-    axes[3].plot(steps, φ_var, color="brown", label="Φ variance", linewidth=1.4)
-    axes[3].plot(steps, entropy_smooth, color="purple", alpha=0.6, label="entropy", linewidth=1.2)
-    axes[3].plot(steps, gap, color="gray", alpha=0.5, label="Decision Gap", linewidth=1.2)
-    axes[3].set_xlabel("Step")
-    axes[3].set_ylabel("Variance / Entropy / Gap")
-    axes[3].set_title("Stability vs Adaptation")
-    axes[3].legend()
-    axes[3].grid(alpha=0.3)
 
+    # --- 1. Φ (Polarity) Dynamics (Use ax0) ---
+    phi_smooth = gaussian_filter1d(s["phi"], sigma=sigma)
+    ax0.plot(steps, phi_smooth, color="teal", label="Φ (smoothed)", linewidth=1.6)
+    ax0.fill_between(steps, phi_smooth - 0.1, phi_smooth + 0.1, color="teal", alpha=0.15)
+    ax0.axhline(0, color="gray", ls="--", lw=0.8)
+    ax0.set_ylabel("Φ (polarity)")
+    ax0.set_title("Φ (Polarity) Dynamics & Policy Learning")
+    ax0.legend()
+    ax0.grid(alpha=0.3)
+
+    # --- 2. Heuristic Score (Policy Q-Value) Evolution (Use ax1) ---
+    score_smooth = gaussian_filter1d(s["heuristic_score"], sigma=sigma)
+    ax1.plot(steps, score_smooth, color="purple", label="Heuristic Score (Q-value)", linewidth=1.4)
+    ax1.axhline(0, color="gray", ls=":", lw=0.8, label="Zero Reward")
+    ax1.set_ylabel("Heuristic Score (Smoothed)")
+    ax1.set_xlabel("Search Step") # Add X-label to the shared axis
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    # --- 3. Rule Score Distribution (Violin Plot) (Use ax2) ---
+    data_to_plot = [s["merge_scores"], s["branch_scores"], s["stabilize_scores"]]
+    labels = ["Merge", "Branch", "Stabilize"]
+
+    plot_data_filtered = [d for d in data_to_plot if len(d) > 0]
+    plot_labels_filtered = [l for d, l in zip(data_to_plot, labels) if len(d) > 0]
+
+    if plot_data_filtered:
+        parts = ax2.violinplot(plot_data_filtered, showmeans=True, showmedians=False)
+        ax2.set_xticks(np.arange(1, len(plot_labels_filtered) + 1))
+        ax2.set_xticklabels(plot_labels_filtered)
+        ax2.set_title("Policy Preference: Distribution of Heuristic Scores by Rule")
+        ax2.set_ylabel("Heuristic Score (Q-Value)")
+        ax2.axhline(0, color="gray", ls=":", lw=0.8)
+        ax2.grid(alpha=0.3)
+
+        colors = ['#8da0cb', '#fc8d62', '#66c2a5']
+        for i, pc in enumerate(parts['bodies']):
+            pc.set_facecolor(colors[i % len(colors)])
+            pc.set_edgecolor('black')
+            pc.set_alpha(0.8)
+    else:
+        ax2.text(0.5, 0.5, "No rule data to plot.", horizontalalignment='center', verticalalignment='center', transform=ax2.transAxes)
+
+    # Use tight_layout to clean up spacing
     plt.tight_layout()
 
     # Ensure output directory exists
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     plt.savefig(OUT_PATH, dpi=300, bbox_inches="tight")
-    print(f"✅ Saved visualization to {OUT_PATH}")
+    print(f"✅ Saved new visualization to {OUT_PATH}")
     plt.show()
 
 
@@ -205,9 +155,14 @@ def plot_dynamics(s, records=None):
 # Entry Point
 # -------------------------------------------------------------------
 def main():
-    recs = load_journal(JOURNAL_PATH)
-    stats = extract_stats(recs)
-    plot_dynamics(stats, records=recs)
+    try:
+        stats = load_and_extract_stats(JOURNAL_PATH)
+        if stats:
+            plot_dynamics(stats)
+    except FileNotFoundError as e:
+        print(e)
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 
 if __name__ == "__main__":

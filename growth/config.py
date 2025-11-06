@@ -9,7 +9,7 @@ CONFIG = {
     # "embedding_model": "all-mpnet-base-v2",
     # "embedding_model": "all-roberta-large-v1",
     "embedding_model": "all-MiniLM-L6-v2",
-    "embed_channels": 3,  # try 4 or 8
+    "embed_channels": 8,  # try 4 or 8
     "embed_scale": 25.0,
     "embed_shape": (3, 3, 3),
     "polarity_scale": 1.0,
