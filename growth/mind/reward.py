@@ -1,87 +1,91 @@
-# --- File: growth/reward.py (Accuracy-Only Reward) ---
+"""Reward computation utilities for the Growth mind."""
+from __future__ import annotations
+
 from dataclasses import dataclass
-import numpy as np
 import time
-from typing import TYPE_CHECKING
+from typing import Callable, Tuple, TYPE_CHECKING
 from torch.utils.tensorboard import SummaryWriter
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover - used for type checking only
     from growth.mind.growth_mind import GrowthMind
     from growth.node.core_node import GrowthNode
 
-# --- Global Initialization and Constants ---
-TENSORBOARD_WRITER = SummaryWriter(f'runs/growth_exp_{time.strftime("%Y%m%d-%H%M%S")}')
 
-# Logging State
-_REWARD_COUNTER = 0
-_TOTAL_REWARD_SUM = 0.0
-_PRINT_INTERVAL = 5000  # Keeping speed optimization
-_STATS_BUFFER = []
+__all__ = ["compute_total_reward", "RewardParams", "TENSORBOARD_WRITER"]
 
 
-# --- Reward Parameters (Accuracy Only) ---
+TENSORBOARD_WRITER = SummaryWriter(
+    f"runs/growth_exp_{time.strftime('%Y%m%d-%H%M%S')}"
+)
+
+
 @dataclass
 class RewardParams:
-    # ONLY these two parameters remain
+    """Extrinsic reward configuration."""
+
     correct_reward: float = +1.0
     incorrect_penalty: float = -1.0
-    # All intrinsic (r2r_multiplier, depth_penalty, etc.) parameters removed.
 
 
-# --- Core Logic Functions ---
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
-def _safe_mean(x: np.ndarray) -> float:
-    return float(np.mean(x)) if len(x) > 0 else 0.0
+def _counter(*, start: int = 0, interval: int = 5000) -> Callable[[], Tuple[int, bool]]:
+    """Create a simple step counter that emits (step, should_log)."""
+
+    step = start
+
+    def advance() -> Tuple[int, bool]:
+        nonlocal step
+        step += 1
+        should_log = (step % interval) == 0
+        return step, should_log
+
+    return advance
 
 
-def _log_stats_to_tensorboard(total: float, is_correct: bool, curiosity: float):
-    """Updates the global buffer and logs to TensorBoard on the interval."""
-    global _REWARD_COUNTER, _STATS_BUFFER, _TOTAL_REWARD_SUM
+def _safe_divide(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator else 0.0
 
-    # curiosity is always 0.0 in this setup but is included for consistent logging structure
-    _STATS_BUFFER.append({"total": total, "is_correct": is_correct, "curiosity": curiosity})
 
-    if _REWARD_COUNTER % _PRINT_INTERVAL == 0 and _REWARD_COUNTER != 0:
-        stats = np.array([d["total"] for d in _STATS_BUFFER])
-        corrects = sum(d["is_correct"] for d in _STATS_BUFFER)
-        curiosity_vals = [d["curiosity"] for d in _STATS_BUFFER]
-        buffer_len = len(_STATS_BUFFER)
+_step_counter = _counter(interval=5000)
+_total_reward_sum: float = 0.0
+_correct_count: int = 0
 
-        _TOTAL_REWARD_SUM += np.sum(stats)
-        avg_cumulative_reward = _TOTAL_REWARD_SUM / _REWARD_COUNTER
 
-        # TensorBoard Logging
-        TENSORBOARD_WRITER.add_scalar('Performance/Accuracy', corrects / buffer_len, _REWARD_COUNTER)
-        TENSORBOARD_WRITER.add_scalar('Reward/Mean_Total_Reward', _safe_mean(stats), _REWARD_COUNTER)
-        TENSORBOARD_WRITER.add_scalar('Intrinsic/Avg_Curiosity_Bonus', _safe_mean(curiosity_vals), _REWARD_COUNTER)
-        TENSORBOARD_WRITER.add_scalar('Reward/Cumulative_Reward', avg_cumulative_reward, _REWARD_COUNTER)
-        TENSORBOARD_WRITER.flush()
-
-        _STATS_BUFFER.clear()
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def compute_total_reward(
-        *,
-        mind: "GrowthMind",
-        solution_node: "GrowthNode",
-        is_correct: bool,
-        params: RewardParams,
+    *,
+    mind: "GrowthMind",
+    solution_node: "GrowthNode",
+    is_correct: bool,
+    params: RewardParams,
 ) -> float:
-    """Calculates the total reward for a path based ONLY on extrinsic correctness."""
-    global _REWARD_COUNTER
-    _REWARD_COUNTER += 1
+    """Compute the total reward for the current step."""
 
-    # 1. Base (Extrinsic) Reward: +1.0 for correct, -1.0 for incorrect (Pure Accuracy)
+    global _total_reward_sum, _correct_count
+
     total = params.correct_reward if is_correct else params.incorrect_penalty
+    _total_reward_sum += total
+    if is_correct:
+        _correct_count += 1
 
-    # 2. Curiosity Bonus (REMOVED)
-    curiosity = 0.0
+    step, should_log = _step_counter()
 
-    # 3. Non-Terminal Penalty (REMOVED)
+    # Per-step logging for the new dashboards
+    TENSORBOARD_WRITER.add_scalar("Reward/Total", total, step)
 
-    # 4. Depth Penalty (REMOVED)
+    if should_log:
+        accuracy = _safe_divide(_correct_count, step)
+        avg_reward = _safe_divide(_total_reward_sum, step)
 
-    # 5. Logging to TensorBoard
-    _log_stats_to_tensorboard(total, is_correct, curiosity)
+        TENSORBOARD_WRITER.add_scalar("Performance/Accuracy", accuracy, step)
+        TENSORBOARD_WRITER.add_scalar("Reward/Mean_Total_Reward", avg_reward, step)
+        TENSORBOARD_WRITER.add_scalar("Reward/Cumulative_Reward", _total_reward_sum, step)
+        TENSORBOARD_WRITER.flush()
 
     return total
